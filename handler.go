@@ -232,3 +232,9 @@ func (h *GODNSHandler) getQuestionType(q dns.Question) int {
 	return notIPQuery
 }
 
+func UnFqdn(s string) string {
+	if dns.IsFqdn(s) {
+		return s[:len(s)-1]
+	}
+	return s
+}
