@@ -2,23 +2,28 @@ package godns
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/hoisie/redis"
-
+	"github.com/go-redis/redis/v9"
 	"github.com/ProxyFi/GoDNS/internal/log"
 )
 
+// Hosts manages host records from a local file and a remote Redis instance.
+// It prioritizes the local hosts file over Redis.
 type Hosts struct {
 	fileHosts       *FileHosts
 	redisHosts      *RedisHosts
 	refreshInterval time.Duration
 }
 
+// NewHosts creates a new Hosts instance. It initializes FileHosts and RedisHosts
+// based on the provided settings and starts a background goroutine to refresh
+// the host records at a regular interval.
 func NewHosts(hs HostsSettings, rs RedisSettings) Hosts {
 	fileHosts := &FileHosts{
 		file:  hs.HostsFile,
@@ -27,9 +32,13 @@ func NewHosts(hs HostsSettings, rs RedisSettings) Hosts {
 
 	var redisHosts *RedisHosts
 	if hs.RedisEnable {
-		rc := &redis.Client{Addr: rs.Addr(), Db: rs.DB, Password: rs.Password}
+		rdb := redis.NewClient(&redis.Options{
+			Addr:     rs.Addr(),
+			DB:       rs.DB,
+			Password: rs.Password,
+		})
 		redisHosts = &RedisHosts{
-			redis: rc,
+			redis: rdb,
 			key:   hs.RedisKey,
 			hosts: make(map[string]string),
 		}
@@ -38,38 +47,46 @@ func NewHosts(hs HostsSettings, rs RedisSettings) Hosts {
 	hosts := Hosts{fileHosts, redisHosts, time.Second * time.Duration(hs.RefreshInterval)}
 	hosts.refresh()
 	return hosts
-
 }
 
-/*
-Match local /etc/hosts file first, remote redis records second
-*/
+// Get attempts to find the IP address(es) for a given domain.
+// It first checks the local hosts file, and if not found, it then checks Redis.
+// The `family` parameter specifies whether to look for IPv4 or IPv6 addresses.
+// It returns a slice of net.IP and a boolean indicating if a match was found.
 func (h *Hosts) Get(domain string, family int) ([]net.IP, bool) {
-
 	var sips []string
 	var ip net.IP
 	var ips []net.IP
+	var ok bool
 
-	sips, ok := h.fileHosts.Get(domain)
+	// Match local /etc/hosts file first.
+	sips, ok = h.fileHosts.Get(domain)
 	if !ok {
+		// If not found, match remote redis records second.
 		if h.redisHosts != nil {
 			sips, ok = h.redisHosts.Get(domain)
 		}
 	}
 
-	if sips == nil {
+	if !ok || sips == nil {
 		return nil, false
 	}
 
 	for _, sip := range sips {
+		parsedIP := net.ParseIP(sip)
+		if parsedIP == nil {
+			continue
+		}
+
 		switch family {
 		case _IP4Query:
-			ip = net.ParseIP(sip).To4()
+			ip = parsedIP.To4()
 		case _IP6Query:
-			ip = net.ParseIP(sip).To16()
+			ip = parsedIP.To16()
 		default:
 			continue
 		}
+
 		if ip != nil {
 			ips = append(ips, ip)
 		}
@@ -78,9 +95,8 @@ func (h *Hosts) Get(domain string, family int) ([]net.IP, bool) {
 	return ips, (ips != nil)
 }
 
-/*
-Update hosts records from /etc/hosts file and redis per minute
-*/
+// refresh starts a background goroutine to update host records from the
+// local file and Redis at a fixed interval.
 func (h *Hosts) refresh() {
 	ticker := time.NewTicker(h.refreshInterval)
 	go func() {
@@ -94,6 +110,7 @@ func (h *Hosts) refresh() {
 	}()
 }
 
+// RedisHosts manages host records stored in a Redis hash.
 type RedisHosts struct {
 	redis *redis.Client
 	key   string
@@ -101,6 +118,8 @@ type RedisHosts struct {
 	mu    sync.RWMutex
 }
 
+// Get retrieves the IP address(es) for a given domain from the Redis-backed cache.
+// It supports exact domain matching and wildcard matching for subdomains.
 func (r *RedisHosts) Get(domain string) ([]string, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -111,6 +130,7 @@ func (r *RedisHosts) Get(domain string) ([]string, bool) {
 		return strings.Split(ip, ","), true
 	}
 
+	// Support wildcard domains like "*.example.com"
 	for host, ip := range r.hosts {
 		if strings.HasPrefix(host, "*.") {
 			if strings.HasSuffix(domain, strings.TrimPrefix(host, "*")) {
@@ -121,34 +141,53 @@ func (r *RedisHosts) Get(domain string) ([]string, bool) {
 	return nil, false
 }
 
+// Set adds or updates a host record in the Redis hash.
 func (r *RedisHosts) Set(domain, ip string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.redis.Hset(r.key, strings.ToLower(domain), []byte(ip))
+	
+	cmd := r.redis.HSet(ctx, r.key, strings.ToLower(domain), ip)
+	return cmd.Val() > 0, cmd.Err()
 }
 
+// Refresh updates the in-memory cache of host records by fetching all
+// key-value pairs from the Redis hash.
 func (r *RedisHosts) Refresh() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.clear()
-	err := r.redis.Hgetall(r.key, r.hosts)
+
+	result, err := r.redis.HGetAll(ctx, r.key).Result()
 	if err != nil {
-		log.Warn("Update hosts records from redis failed %s", err)
+		log.Warn("Update hosts records from redis failed: %s", err)
 	} else {
-		log.Debug("Update hosts records from redis")
+		for host, ip := range result {
+			r.hosts[host] = ip
+		}
+		log.Debug("Updated hosts records from redis. Total %d records.", len(r.hosts))
 	}
 }
 
+// clear empties the in-memory map of host records.
 func (r *RedisHosts) clear() {
 	r.hosts = make(map[string]string)
 }
 
+// FileHosts manages host records from a local file, like `/etc/hosts`.
 type FileHosts struct {
 	file  string
 	hosts map[string]string
 	mu    sync.RWMutex
 }
 
+// Get retrieves the IP address(es) for a given domain from the local file cache.
+// It supports exact domain matching and wildcard matching.
 func (f *FileHosts) Get(domain string) ([]string, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -158,6 +197,7 @@ func (f *FileHosts) Get(domain string) ([]string, bool) {
 		return []string{ip}, true
 	}
 
+	// Support wildcard domains like "*.example.com"
 	for host, ip := range f.hosts {
 		if strings.HasPrefix(host, "*.") {
 			if strings.HasSuffix(domain, strings.TrimPrefix(host, "*")) {
@@ -169,10 +209,11 @@ func (f *FileHosts) Get(domain string) ([]string, bool) {
 	return nil, false
 }
 
+// Refresh reads and parses the host file, updating the in-memory cache.
 func (f *FileHosts) Refresh() {
 	buf, err := os.Open(f.file)
 	if err != nil {
-		log.Warn("Update hosts records from file failed %s", err)
+		log.Warn("Update hosts records from file failed: %s", err)
 		return
 	}
 	defer buf.Close()
@@ -184,41 +225,43 @@ func (f *FileHosts) Refresh() {
 
 	scanner := bufio.NewScanner(buf)
 	for scanner.Scan() {
-
 		line := scanner.Text()
 		line = strings.TrimSpace(line)
-		line = strings.Replace(line, "\t", " ", -1)
+		line = strings.ReplaceAll(line, "\t", " ")
 
 		if strings.HasPrefix(line, "#") || line == "" {
 			continue
 		}
 
-		sli := strings.Split(line, " ")
+		parts := strings.Split(line, " ")
 
-		if len(sli) < 2 {
+		if len(parts) < 2 {
 			continue
 		}
 
-		ip := sli[0]
+		ip := parts[0]
 		if !isIP(ip) {
 			continue
 		}
 
-		// Would have multiple columns of domain in line.
-		// Such as "127.0.0.1  localhost localhost.domain" on linux.
-		// The domains may not strict standard, like "local" so don't check with f.isDomain(domain).
-		for i := 1; i <= len(sli)-1; i++ {
-			domain := strings.TrimSpace(sli[i])
+		// The rest of the line contains one or more domains.
+		for i := 1; i < len(parts); i++ {
+			domain := strings.TrimSpace(parts[i])
 			if domain == "" {
 				continue
 			}
-
 			f.hosts[strings.ToLower(domain)] = ip
 		}
 	}
-	log.Debug("update hosts records from %s, total %d records.", f.file, len(f.hosts))
+	log.Debug("Updated hosts records from %s. Total %d records.", f.file, len(f.hosts))
 }
 
+// clear empties the in-memory map of host records.
 func (f *FileHosts) clear() {
 	f.hosts = make(map[string]string)
+}
+
+// isIP checks if a string is a valid IP address.
+func isIP(s string) bool {
+	return net.ParseIP(s) != nil
 }
