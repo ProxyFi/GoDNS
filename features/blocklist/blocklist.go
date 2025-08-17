@@ -2,7 +2,7 @@
 package blocklist
 
 import (
-	log "github.com/ProxyFi/GoDNS"
+	"github.com/ProxyFi/GoDNS/internal/log"
 	"time"
 	"sync"
 )
