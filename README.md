@@ -21,7 +21,7 @@ Similar to [dnsmasq](http://www.thekelleys.org.uk/dnsmasq/doc.html), but support
 
 2. Build  
 
-		$ cd $GOPATH/src/github.com/kenshinx/godns 
+		$ cd $GOPATH/src/github.com/ProxyFi/GoDNS
 		$ go build -o godns 
 
 
