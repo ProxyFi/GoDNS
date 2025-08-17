@@ -16,12 +16,12 @@ Similar to [dnsmasq](http://www.thekelleys.org.uk/dnsmasq/doc.html), but support
 
 1. Install  
 
-		$ go get github.com/kenshinx/godns
+		$ go get github.com/ProxyFi/GoDNS
 
 
 2. Build  
 
-		$ cd $GOPATH/src/github.com/kenshinx/godns 
+		$ cd $GOPATH/src/github.com/ProxyFi/GoDNS
 		$ go build -o godns 
 
 
