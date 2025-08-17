@@ -1,274 +1,267 @@
 package godns
 
 import (
-	"crypto/md5"
-	"encoding/json"
-	"fmt"
+	"bufio"
+	"context"
+	"net"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/bradfitz/gomemcache/memcache"
-	"github.com/hoisie/redis"
-	"github.com/miekg/dns"
+	"github.com/go-redis/redis/v9"
+	"github.com/ProxyFi/GoDNS/internal/log"
 )
 
-type KeyNotFound struct {
-	key string
+// Hosts manages host records from a local file and a remote Redis instance.
+// It prioritizes the local hosts file over Redis.
+type Hosts struct {
+	fileHosts       *FileHosts
+	redisHosts      *RedisHosts
+	refreshInterval time.Duration
 }
 
-func (e KeyNotFound) Error() string {
-	return e.key + " " + "not found"
+// NewHosts creates a new Hosts instance. It initializes FileHosts and RedisHosts
+// based on the provided settings and starts a background goroutine to refresh
+// the host records at a regular interval.
+func NewHosts(hs HostsSettings, rs RedisSettings) Hosts {
+	fileHosts := &FileHosts{
+		file:  hs.HostsFile,
+		hosts: make(map[string]string),
+	}
+
+	var redisHosts *RedisHosts
+	if hs.RedisEnable {
+		rdb := redis.NewClient(&redis.Options{
+			Addr:     rs.Addr(),
+			DB:       rs.DB,
+			Password: rs.Password,
+		})
+		redisHosts = &RedisHosts{
+			redis: rdb,
+			key:   hs.RedisKey,
+			hosts: make(map[string]string),
+		}
+	}
+
+	hosts := Hosts{fileHosts, redisHosts, time.Second * time.Duration(hs.RefreshInterval)}
+	hosts.refresh()
+	return hosts
 }
 
-type KeyExpired struct {
-	Key string
-}
+// Get attempts to find the IP address(es) for a given domain.
+// It first checks the local hosts file, and if not found, it then checks Redis.
+// The `family` parameter specifies whether to look for IPv4 or IPv6 addresses.
+// It returns a slice of net.IP and a boolean indicating if a match was found.
+func (h *Hosts) Get(domain string, family int) ([]net.IP, bool) {
+	var sips []string
+	var ip net.IP
+	var ips []net.IP
+	var ok bool
 
-func (e KeyExpired) Error() string {
-	return e.Key + " " + "expired"
-}
-
-type CacheIsFull struct {
-}
-
-func (e CacheIsFull) Error() string {
-	return "Cache is Full"
-}
-
-type SerializerError struct {
-	err error
-}
-
-func (e SerializerError) Error() string {
-	return fmt.Sprintf("Serializer error: got %v", e.err)
-}
-
-type Mesg struct {
-	Msg    *dns.Msg
-	Expire time.Time
-}
-
-type Cache interface {
-	Get(key string) (Msg *dns.Msg, err error)
-	Set(key string, Msg *dns.Msg) error
-	Exists(key string) bool
-	Remove(key string) error
-	Full() bool
-}
-
-type MemoryCache struct {
-	Backend  map[string]Mesg
-	Expire   time.Duration
-	Maxcount int
-	mu       sync.RWMutex
-}
-
-func (c *MemoryCache) Get(key string) (*dns.Msg, error) {
-	c.mu.RLock()
-	mesg, ok := c.Backend[key]
-	c.mu.RUnlock()
+	// Match local /etc/hosts file first.
+	sips, ok = h.fileHosts.Get(domain)
 	if !ok {
-		return nil, KeyNotFound{key}
+		// If not found, match remote redis records second.
+		if h.redisHosts != nil {
+			sips, ok = h.redisHosts.Get(domain)
+		}
 	}
 
-	if mesg.Expire.Before(time.Now()) {
-		c.Remove(key)
-		return nil, KeyExpired{key}
+	if !ok || sips == nil {
+		return nil, false
 	}
 
-	return mesg.Msg, nil
+	for _, sip := range sips {
+		parsedIP := net.ParseIP(sip)
+		if parsedIP == nil {
+			continue
+		}
 
-}
+		switch family {
+		case _IP4Query:
+			ip = parsedIP.To4()
+		case _IP6Query:
+			ip = parsedIP.To16()
+		default:
+			continue
+		}
 
-func (c *MemoryCache) Set(key string, msg *dns.Msg) error {
-	if c.Full() && !c.Exists(key) {
-		return CacheIsFull{}
+		if ip != nil {
+			ips = append(ips, ip)
+		}
 	}
 
-	expire := time.Now().Add(c.Expire)
-	mesg := Mesg{msg, expire}
-	c.mu.Lock()
-	c.Backend[key] = mesg
-	c.mu.Unlock()
-	return nil
+	return ips, (ips != nil)
 }
 
-func (c *MemoryCache) Remove(key string) error {
-	c.mu.Lock()
-	delete(c.Backend, key)
-	c.mu.Unlock()
-	return nil
+// refresh starts a background goroutine to update host records from the
+// local file and Redis at a fixed interval.
+func (h *Hosts) refresh() {
+	ticker := time.NewTicker(h.refreshInterval)
+	go func() {
+		for {
+			h.fileHosts.Refresh()
+			if h.redisHosts != nil {
+				h.redisHosts.Refresh()
+			}
+			<-ticker.C
+		}
+	}()
 }
 
-func (c *MemoryCache) Exists(key string) bool {
-	c.mu.RLock()
-	_, ok := c.Backend[key]
-	c.mu.RUnlock()
-	return ok
+// RedisHosts manages host records stored in a Redis hash.
+type RedisHosts struct {
+	redis *redis.Client
+	key   string
+	hosts map[string]string
+	mu    sync.RWMutex
 }
 
-func (c *MemoryCache) Length() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return len(c.Backend)
-}
+// Get retrieves the IP address(es) for a given domain from the Redis-backed cache.
+// It supports exact domain matching and wildcard matching for subdomains.
+func (r *RedisHosts) Get(domain string) ([]string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
-func (c *MemoryCache) Full() bool {
-	// if Maxcount is zero. the cache will never be full.
-	if c.Maxcount == 0 {
-		return false
+	domain = strings.ToLower(domain)
+	ip, ok := r.hosts[domain]
+	if ok {
+		return strings.Split(ip, ","), true
 	}
-	return c.Length() >= c.Maxcount
-}
 
-/*
-Memcached backend
-*/
-
-func NewMemcachedCache(servers []string, expire int32) *MemcachedCache {
-	c := memcache.New(servers...)
-	return &MemcachedCache{
-		backend: c,
-		expire:  expire,
+	// Support wildcard domains like "*.example.com"
+	for host, ip := range r.hosts {
+		if strings.HasPrefix(host, "*.") {
+			if strings.HasSuffix(domain, strings.TrimPrefix(host, "*")) {
+				return strings.Split(ip, ","), true
+			}
+		}
 	}
+	return nil, false
 }
 
-type MemcachedCache struct {
-	backend *memcache.Client
-	expire  int32
+// Set adds or updates a host record in the Redis hash.
+func (r *RedisHosts) Set(domain, ip string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	
+	cmd := r.redis.HSet(ctx, r.key, strings.ToLower(domain), ip)
+	return cmd.Val() > 0, cmd.Err()
 }
 
-func (m *MemcachedCache) Set(key string, msg *dns.Msg) error {
-	var val []byte
-	var err error
+// Refresh updates the in-memory cache of host records by fetching all
+// key-value pairs from the Redis hash.
+func (r *RedisHosts) Refresh() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-	// handle cases for negacache where it sets nil values
-	if msg == nil {
-		val = []byte("nil")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.clear()
+
+	result, err := r.redis.HGetAll(ctx, r.key).Result()
+	if err != nil {
+		log.Warn("Update hosts records from redis failed: %s", err)
 	} else {
-		val, err = msg.Pack()
+		for host, ip := range result {
+			r.hosts[host] = ip
+		}
+		log.Debug("Updated hosts records from redis. Total %d records.", len(r.hosts))
 	}
+}
+
+// clear empties the in-memory map of host records.
+func (r *RedisHosts) clear() {
+	r.hosts = make(map[string]string)
+}
+
+// FileHosts manages host records from a local file, like `/etc/hosts`.
+type FileHosts struct {
+	file  string
+	hosts map[string]string
+	mu    sync.RWMutex
+}
+
+// Get retrieves the IP address(es) for a given domain from the local file cache.
+// It supports exact domain matching and wildcard matching.
+func (f *FileHosts) Get(domain string) ([]string, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	domain = strings.ToLower(domain)
+	ip, ok := f.hosts[domain]
+	if ok {
+		return []string{ip}, true
+	}
+
+	// Support wildcard domains like "*.example.com"
+	for host, ip := range f.hosts {
+		if strings.HasPrefix(host, "*.") {
+			if strings.HasSuffix(domain, strings.TrimPrefix(host, "*")) {
+				return []string{ip}, true
+			}
+		}
+	}
+
+	return nil, false
+}
+
+// Refresh reads and parses the host file, updating the in-memory cache.
+func (f *FileHosts) Refresh() {
+	buf, err := os.Open(f.file)
 	if err != nil {
-		err = SerializerError{err}
+		log.Warn("Update hosts records from file failed: %s", err)
+		return
 	}
-	return m.backend.Set(&memcache.Item{Key: key, Value: val, Expiration: m.expire})
-}
+	defer buf.Close()
 
-func (m *MemcachedCache) Get(key string) (*dns.Msg, error) {
-	var msg dns.Msg
-	item, err := m.backend.Get(key)
-	if err != nil {
-		err = KeyNotFound{key}
-		return &msg, err
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.clear()
+
+	scanner := bufio.NewScanner(buf)
+	for scanner.Scan() {
+		line := scanner.Text()
+		line = strings.TrimSpace(line)
+		line = strings.ReplaceAll(line, "\t", " ")
+
+		if strings.HasPrefix(line, "#") || line == "" {
+			continue
+		}
+
+		parts := strings.Split(line, " ")
+
+		if len(parts) < 2 {
+			continue
+		}
+
+		ip := parts[0]
+		if !isIP(ip) {
+			continue
+		}
+
+		// The rest of the line contains one or more domains.
+		for i := 1; i < len(parts); i++ {
+			domain := strings.TrimSpace(parts[i])
+			if domain == "" {
+				continue
+			}
+			f.hosts[strings.ToLower(domain)] = ip
+		}
 	}
-	err = msg.Unpack(item.Value)
-	if err != nil {
-		err = SerializerError{err}
-	}
-	return &msg, err
+	log.Debug("Updated hosts records from %s. Total %d records.", f.file, len(f.hosts))
 }
 
-func (m *MemcachedCache) Exists(key string) bool {
-	_, err := m.backend.Get(key)
-	if err != nil {
-		return true
-	}
-	return false
+// clear empties the in-memory map of host records.
+func (f *FileHosts) clear() {
+	f.hosts = make(map[string]string)
 }
 
-func (m *MemcachedCache) Remove(key string) error {
-	return m.backend.Delete(key)
-}
-
-func (m *MemcachedCache) Full() bool {
-	// memcache is never full (LRU)
-	return false
-}
-
-/*
-Redis cache Backend
-*/
-
-func NewRedisCache(rs RedisSettings, expire int64) *RedisCache {
-	rc := &redis.Client{Addr: rs.Addr(), Db: rs.DB, Password: rs.Password}
-	return &RedisCache{
-		Backend: rc,
-		Expire:  expire,
-	}
-}
-
-type RedisCache struct {
-	Backend *redis.Client
-	Expire  int64
-}
-
-func (r *RedisCache) Get(key string) (*dns.Msg, error) {
-	var msg dns.Msg
-	item, err := r.Backend.Get(key)
-	if err != nil {
-		err = KeyNotFound{key}
-		return &msg, err
-	}
-	err = msg.Unpack(item)
-	if err != nil {
-		err = SerializerError{err}
-	}
-	return &msg, err
-}
-
-func (r *RedisCache) Set(key string, msg *dns.Msg) error {
-	var val []byte
-	var err error
-
-	// handle cases for negacache where it sets nil values
-	if msg == nil {
-		val = []byte("nil")
-	} else {
-		val, err = msg.Pack()
-	}
-	if err != nil {
-		err = SerializerError{err}
-	}
-	return r.Backend.Setex(key, r.Expire, val)
-}
-
-func (r *RedisCache) Exists(key string) bool {
-	_, err := r.Backend.Get(key)
-	if err != nil {
-		return true
-	}
-	return false
-}
-
-func (r *RedisCache) Remove(key string) error {
-	_, err := r.Backend.Del(key)
-	return err
-}
-
-func (r *RedisCache) Full() bool {
-	return false
-}
-
-func KeyGen(q Question) string {
-	h := md5.New()
-	h.Write([]byte(q.String()))
-	x := h.Sum(nil)
-	key := fmt.Sprintf("%x", x)
-	return key
-}
-
-/* we need to define marsheling to encode and decode
- */
-type JsonSerializer struct {
-}
-
-func (*JsonSerializer) Dumps(mesg *dns.Msg) (encoded []byte, err error) {
-	encoded, err = json.Marshal(*mesg)
-	return
-}
-
-func (*JsonSerializer) Loads(data []byte) (*dns.Msg, error) {
-	var mesg dns.Msg
-	err := json.Unmarshal(data, &mesg)
-	return &mesg, err
+// isIP checks if a string is a valid IP address.
+func isIP(s string) bool {
+	return net.ParseIP(s) != nil
 }
