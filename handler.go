@@ -132,7 +132,7 @@ func (h *GODNSHandler) Do(Net string, w dns.ResponseWriter, req *dns.Msg) {
 	// --- Blocklist check ---
 	domain := UnFqdn(q.Name)
 	if h.blocklist.IsBlocked(domain) {
-		logger.Debug("Domain %s is blocked, returning NXDOMAIN", domain)
+		log.Debug("Domain %s is blocked, returning NXDOMAIN", domain)
 		m := new(dns.Msg)
 		m.SetReply(req)
 		m.SetRcode(req, dns.RcodeNameError) // NXDOMAIN
@@ -182,14 +182,14 @@ func (h *GODNSHandler) Do(Net string, w dns.ResponseWriter, req *dns.Msg) {
 	mesg, err := h.cache.Get(key)
 	if err != nil {
 		if mesg, err = h.negCache.Get(key); err != nil {
-			logger.Debug("%s didn't hit cache", Q.String())
+			log.Debug("%s didn't hit cache", Q.String())
 		} else {
-			logger.Debug("%s hit negative cache", Q.String())
+			log.Debug("%s hit negative cache", Q.String())
 			dns.HandleFailed(w, req)
 			return
 		}
 	} else {
-		logger.Debug("%s hit cache", Q.String())
+		log.Debug("%s hit cache", Q.String())
 		// we need this copy against concurrent modification of Id
 		msg := *mesg
 		msg.Id = req.Id
@@ -200,12 +200,12 @@ func (h *GODNSHandler) Do(Net string, w dns.ResponseWriter, req *dns.Msg) {
 	mesg, err = h.resolver.Lookup(Net, req)
 
 	if err != nil {
-		logger.Warn("Resolve query error %s", err)
+		log.Warn("Resolve query error %s", err)
 		dns.HandleFailed(w, req)
 
 		// cache the failure, too!
 		if err = h.negCache.Set(key, nil); err != nil {
-			logger.Warn("Set %s negative cache failed: %v", Q.String(), err)
+			log.Warn("Set %s negative cache failed: %v", Q.String(), err)
 		}
 		return
 	}
@@ -215,9 +215,9 @@ func (h *GODNSHandler) Do(Net string, w dns.ResponseWriter, req *dns.Msg) {
 	if len(mesg.Answer) > 0 {
 		err = h.cache.Set(key, mesg)
 		if err != nil {
-			logger.Warn("Set %s cache failed: %s", Q.String(), err.Error())
+			log.Warn("Set %s cache failed: %s", Q.String(), err.Error())
 		}
-		logger.Debug("Insert %s into cache", Q.String())
+		log.Debug("Insert %s into cache", Q.String())
 	}
 }
 

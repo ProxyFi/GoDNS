@@ -131,9 +131,9 @@ func (r *RedisHosts) Refresh() {
 	r.clear()
 	err := r.redis.Hgetall(r.key, r.hosts)
 	if err != nil {
-		logger.Warn("Update hosts records from redis failed %s", err)
+		log.Warn("Update hosts records from redis failed %s", err)
 	} else {
-		logger.Debug("Update hosts records from redis")
+		log.Debug("Update hosts records from redis")
 	}
 }
 
@@ -170,7 +170,7 @@ func (f *FileHosts) Get(domain string) ([]string, bool) {
 func (f *FileHosts) Refresh() {
 	buf, err := os.Open(f.file)
 	if err != nil {
-		logger.Warn("Update hosts records from file failed %s", err)
+		log.Warn("Update hosts records from file failed %s", err)
 		return
 	}
 	defer buf.Close()
@@ -214,7 +214,7 @@ func (f *FileHosts) Refresh() {
 			f.hosts[strings.ToLower(domain)] = ip
 		}
 	}
-	logger.Debug("update hosts records from %s, total %d records.", f.file, len(f.hosts))
+	log.Debug("update hosts records from %s, total %d records.", f.file, len(f.hosts))
 }
 
 func (f *FileHosts) clear() {

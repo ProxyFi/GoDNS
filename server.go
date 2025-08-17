@@ -48,10 +48,10 @@ func (s *Server) Run() {
 
 func (s *Server) start(ds *dns.Server) {
 
-	logger.Info("Start %s listener on %s", ds.Net, s.Addr())
+	log.Info("Start %s listener on %s", ds.Net, s.Addr())
 	err := ds.ListenAndServe()
 	if err != nil {
-		logger.Error("Start %s listener on %s failed:%s", ds.Net, s.Addr(), err.Error())
+		log.Error("Start %s listener on %s failed:%s", ds.Net, s.Addr(), err.Error())
 	}
 
 }

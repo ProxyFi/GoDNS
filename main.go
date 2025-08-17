@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	logger *GoDNSLogger
+	log.*GoDNSLogger
 )
 
 func main() {
@@ -25,7 +25,7 @@ func main() {
 
 	server.Run()
 
-	logger.Info("godns %s start", settings.Version)
+	log.Info("godns %s start", settings.Version)
 
 	if settings.Debug {
 		go profileCPU()
@@ -39,7 +39,7 @@ forever:
 	for {
 		select {
 		case <-sig:
-			logger.Info("signal received, stopping")
+			log.Info("signal received, stopping")
 			break forever
 		}
 	}
@@ -49,7 +49,7 @@ forever:
 func profileCPU() {
 	f, err := os.Create("godns.cprof")
 	if err != nil {
-		logger.Error("%s", err)
+		log.Error("%s", err)
 		return
 	}
 
@@ -64,7 +64,7 @@ func profileCPU() {
 func profileMEM() {
 	f, err := os.Create("godns.mprof")
 	if err != nil {
-		logger.Error("%s", err)
+		log.Error("%s", err)
 		return
 	}
 
@@ -76,18 +76,18 @@ func profileMEM() {
 }
 
 func initLogger() {
-	logger = NewLogger()
+	log.= NewLogger()
 
 	if settings.Log.Stdout {
-		logger.SetLogger("console", nil)
+		log.SetLogger("console", nil)
 	}
 
 	if settings.Log.File != "" {
 		config := map[string]interface{}{"file": settings.Log.File}
-		logger.SetLogger("file", config)
+		log.SetLogger("file", config)
 	}
 
-	logger.SetLevel(settings.Log.LogLevel())
+	log.SetLevel(settings.Log.LogLevel())
 }
 
 func init() {

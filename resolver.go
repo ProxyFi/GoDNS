@@ -48,8 +48,8 @@ func NewResolver(c ResolvSettings) *Resolver {
 	if len(c.ResolvFile) > 0 {
 		clientConfig, err := dns.ClientConfigFromFile(c.ResolvFile)
 		if err != nil {
-			logger.Error(":%s is not a valid resolv.conf file\n", c.ResolvFile)
-			logger.Error("%s", err)
+			log.Error(":%s is not a valid resolv.conf file\n", c.ResolvFile)
+			log.Error("%s", err)
 			panic(err)
 		}
 		for _, server := range clientConfig.Servers {
@@ -146,8 +146,8 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (message *dns.Msg, err error
 		defer wg.Done()
 		r, rtt, err := c.Exchange(req, nameserver)
 		if err != nil {
-			logger.Warn("%s socket error on %s", qname, nameserver)
-			logger.Warn("error:%s", err.Error())
+			log.Warn("%s socket error on %s", qname, nameserver)
+			log.Warn("error:%s", err.Error())
 			return
 		}
 		// If SERVFAIL happen, should return immediately and try another upstream resolver.
@@ -155,7 +155,7 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (message *dns.Msg, err error
 		// that it has been verified no such domain existas and ask other resolvers
 		// would make no sense. See more about #20
 		if r != nil && r.Rcode != dns.RcodeSuccess {
-			logger.Warn("%s failed to get an valid answer on %s", qname, nameserver)
+			log.Warn("%s failed to get an valid answer on %s", qname, nameserver)
 			if r.Rcode == dns.RcodeServerFailure {
 				return
 			}
@@ -177,7 +177,7 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (message *dns.Msg, err error
 		// but exit early, if we have an answer
 		select {
 		case re := <-res:
-			logger.Debug("%s resolv on %s rtt: %v", UnFqdn(qname), re.nameserver, re.rtt)
+			log.Debug("%s resolv on %s rtt: %v", UnFqdn(qname), re.nameserver, re.rtt)
 			return re.msg, nil
 		case <-ticker.C:
 			continue
@@ -187,7 +187,7 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (message *dns.Msg, err error
 	wg.Wait()
 	select {
 	case re := <-res:
-		logger.Debug("%s resolv on %s rtt: %v", UnFqdn(qname), re.nameserver, re.rtt)
+		log.Debug("%s resolv on %s rtt: %v", UnFqdn(qname), re.nameserver, re.rtt)
 		return re.msg, nil
 	default:
 		return nil, ResolvError{qname, net, nameservers}
@@ -203,7 +203,7 @@ func (r *Resolver) Nameservers(qname string) []string {
 
 	ns := []string{}
 	if v, found := r.domain_server.search(queryKeys); found {
-		logger.Debug("%s be found in domain server list, upstream: %v", qname, v)
+		log.Debug("%s be found in domain server list, upstream: %v", qname, v)
 		server := v
 		nameserver := net.JoinHostPort(server, "53")
 		ns = append(ns, nameserver)

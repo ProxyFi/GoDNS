@@ -33,11 +33,11 @@ type GoDNSLogger struct {
 }
 
 func NewLogger() *GoDNSLogger {
-	logger := &GoDNSLogger{
+	log.:= &GoDNSLogger{
 		mesgs:   make(chan *logMesg, LOG_OUTPUT_BUFFER),
 		outputs: make(map[string]LoggerHandler),
 	}
-	go logger.Run()
+	go log.Run()
 	return logger
 }
 
@@ -111,7 +111,7 @@ func (l *GoDNSLogger) Error(format string, v ...interface{}) {
 
 type ConsoleHandler struct {
 	level  int
-	logger *log.Logger
+	log.*log.Logger
 }
 
 func NewConsoleHandler() LoggerHandler {
@@ -123,21 +123,21 @@ func (h *ConsoleHandler) Setup(config map[string]interface{}) error {
 		level := _level.(int)
 		h.level = level
 	}
-	h.logger = log.New(os.Stdout, "", log.Ldate|log.Ltime)
+	h.log.= log.New(os.Stdout, "", log.Ldate|log.Ltime)
 	return nil
 
 }
 
 func (h *ConsoleHandler) Write(lm *logMesg) {
 	if h.level <= lm.Level {
-		h.logger.Println(lm.Mesg)
+		h.log.Println(lm.Mesg)
 	}
 }
 
 type FileHandler struct {
 	level  int
 	file   string
-	logger *log.Logger
+	log.*log.Logger
 }
 
 func NewFileHandler() LoggerHandler {
@@ -156,18 +156,18 @@ func (h *FileHandler) Setup(config map[string]interface{}) error {
 			return err
 		}
 
-		h.logger = log.New(output, "", log.Ldate|log.Ltime)
+		h.log.= log.New(output, "", log.Ldate|log.Ltime)
 	}
 
 	return nil
 }
 
 func (h *FileHandler) Write(lm *logMesg) {
-	if h.logger == nil {
+	if h.log.== nil {
 		return
 	}
 
 	if h.level <= lm.Level {
-		h.logger.Println(lm.Mesg)
+		h.log.Println(lm.Mesg)
 	}
 }
