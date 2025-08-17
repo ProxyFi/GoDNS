@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"time"
+	"github.com/ProxyFi/GoDNS/internal/log"
 )
 
 var (
