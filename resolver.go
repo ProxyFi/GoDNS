@@ -1,5 +1,4 @@
-package main
-
+package godns
 import (
 	"bufio"
 	"fmt"
