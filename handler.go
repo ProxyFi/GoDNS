@@ -1,7 +1,6 @@
 package godns
 
 import (
-	"net"
 	"time"
 	
 	"github.com/miekg/dns"
