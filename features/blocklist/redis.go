@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	"godns/internal/log"
+	log "github.com/ProxyFi/GoDNS"
 )
 
 // redisBlocklist manages the Redis-based block and allow lists.
