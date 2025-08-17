@@ -6,6 +6,7 @@ import (
 	
 	"github.com/miekg/dns"
 	"github.com/ProxyFi/GoDNS/features/blocklist"
+	"github.com/ProxyFi/GoDNS/internal/log"
 )
 
 const (
