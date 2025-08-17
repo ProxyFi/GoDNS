@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/ProxyFi/GoDNS/internal/log"
 )
 
 type Server struct {
