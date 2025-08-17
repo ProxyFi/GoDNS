@@ -1,5 +1,5 @@
 ## GoDNS
-====
+---
 
 A simple and fast dns cache server written by go.
 
