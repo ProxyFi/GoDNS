@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/redis/redis-go/v9"
+	"github.com/redis/go-redis/v9"
 	"github.com/ProxyFi/GoDNS/internal/log"
 )
 
