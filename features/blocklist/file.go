@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
-	log "github.com/ProxyFi/GoDNS"
+	"github.com/ProxyFi/GoDNS/internal/log"
 )
 
 // fileBlocklist manages the file-based block and allow lists.
