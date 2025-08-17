@@ -1,0 +1,53 @@
+# GitHub Action 名称
+name: "Go Mod Tidy and Auto Push (Single Module)"
+
+# 工作流触发器
+on:
+  # 允许手动从 GitHub Actions UI 触发此工作流
+  workflow_dispatch:
+  # 你也可以添加 'push' 触发器，以便在代码推送时自动运行
+  push:
+
+
+# 定义工作任务
+jobs:
+  # 唯一的任务：运行 go mod tidy 并推送更改
+  tidy_and_push:
+    # 任务运行在 Ubuntu 最新版本上
+    runs-on: ubuntu-latest
+    
+    # 任务中的步骤
+    steps:
+      - name: Checkout code # 步骤1: 检出仓库代码
+        uses: actions/checkout@v4
+        with:
+          # 需要 token 以便能够推送更改
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Go # 步骤2: 设置 Go 环境
+        uses: actions/setup-go@v5
+        with:
+          # 使用 Go 1.22 版本，可根据需要调整
+          go-version: '1.22'
+
+      - name: Run go mod tidy # 步骤3: 在仓库根目录运行 go mod tidy
+        # 因为没有指定 working-directory，所以命令将在根目录执行
+        run: go mod tidy
+
+      - name: Commit and push changes # 步骤4: 提交并推送 go.mod 和 go.sum 的更改
+        run: |
+          # 检查 go.mod 或 go.sum 文件是否有差异
+          if git diff --exit-code go.mod go.sum; then
+            echo "go.mod or go.sum have not been modified. No need to commit."
+          else
+            echo "Changes detected in go.mod or go.sum. Committing and pushing."
+            # 配置 Git 用户信息
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            # 将更改添加到暂存区
+            git add go.mod go.sum
+            # 提交更改
+            git commit -m "Auto: go mod tidy"
+            # 推送更改到当前分支
+            git push
+          fi
