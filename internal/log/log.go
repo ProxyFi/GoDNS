@@ -1,4 +1,4 @@
-package godns
+package log
 
 import (
 	"fmt"
