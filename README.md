@@ -1,8 +1,8 @@
-GODNS
-====
+## GoDNS
 
 A simple and fast dns cache server written by go.
 
+---
 
 Similar to [dnsmasq](http://www.thekelleys.org.uk/dnsmasq/doc.html), but supports some difference features:
 
