@@ -260,8 +260,3 @@ func (f *FileHosts) Refresh() {
 func (f *FileHosts) clear() {
 	f.hosts = make(map[string]string)
 }
-
-// isIP checks if a string is a valid IP address.
-func isIP(s string) bool {
-	return net.ParseIP(s) != nil
-}
