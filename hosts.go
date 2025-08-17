@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/hoisie/redis"
+
+	"github.com/ProxyFi/GoDNS/internal/log"
 )
 
 type Hosts struct {
