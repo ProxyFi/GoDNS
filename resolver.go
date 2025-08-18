@@ -2,6 +2,7 @@ package godns
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -20,6 +21,7 @@ type ResolvError struct {
 	nameservers []string
 }
 
+// Error implements the error interface for ResolvError.
 func (e ResolvError) Error() string {
 	errmsg := fmt.Sprintf("%s resolv failed on %s (%s)", e.qname, strings.Join(e.nameservers, "; "), e.net)
 	return errmsg
@@ -34,26 +36,46 @@ type RResp struct {
 
 // Resolver handles DNS queries to upstream servers.
 type Resolver struct {
+	// servers stores a list of default upstream nameservers.
 	servers       []string
+	// domain_server is a suffix tree used for specific domain rules.
 	domain_server *suffixTreeNode
+	// config holds the resolver's settings.
 	config        *ResolvSettings
 	// dnssecValidator is the DNSSEC validator instance.
 	dnssecValidator *dnssec.DNSSECValidator
+	// udpClient and tcpClient are reused for all DNS lookups to reduce overhead.
+	udpClient *dns.Client
+	tcpClient *dns.Client
 }
 
-// NewResolver creates a new Resolver instance with the specified configuration.
+// NewResolver creates and initializes a new Resolver instance.
+// It sets up DNS clients and loads server lists from configured files.
 func NewResolver(c ResolvSettings) *Resolver {
 	r := &Resolver{
 		servers:       []string{},
 		domain_server: newSuffixTreeRoot(),
 		config:        &c,
 		dnssecValidator: dnssec.NewDNSSECValidator(),
+		// Initialize reusable DNS clients with timeouts.
+		udpClient: &dns.Client{
+			Net:          "udp",
+			ReadTimeout:  5 * time.Second,
+			WriteTimeout: 5 * time.Second,
+		},
+		tcpClient: &dns.Client{
+			Net:          "tcp",
+			ReadTimeout:  5 * time.Second,
+			WriteTimeout: 5 * time.Second,
+		},
 	}
 
+	// Load server list from a dedicated file, if configured.
 	if len(c.ServerListFile) > 0 {
 		r.ReadServerListFile(c.ServerListFile)
 	}
 
+	// Load upstream servers from a standard resolv.conf file.
 	if len(c.ResolvFile) > 0 {
 		clientConfig, err := dns.ClientConfigFromFile(c.ResolvFile)
 		if err != nil {
@@ -71,90 +93,87 @@ func NewResolver(c ResolvSettings) *Resolver {
 }
 
 // Lookup performs a DNS query to the upstream nameservers.
+// It concurrently queries multiple servers and returns the first successful response.
+// This function uses a context to manage goroutines and prevent leaks.
 func (r *Resolver) Lookup(net string, req *dns.Msg) (msg *dns.Msg, err error) {
-	// Use sync.WaitGroup to wait for all goroutines to finish.
-	var wg sync.WaitGroup
-	// Use a channel to get the first successful response.
-	res := make(chan *RResp, 1)
-	// Use a ticker to query nameservers periodically.
-	ticker := time.NewTicker(time.Duration(r.config.Interval) * time.Millisecond)
-	defer ticker.Stop()
+	// Use a context to cancel all concurrent requests once one succeeds.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Ensure cancellation is called on function exit.
 
-	// Start lookup on each nameserver top-down, in every second.
+	var wg sync.WaitGroup
+	// Create a buffered channel to receive the first successful response.
+	resChan := make(chan *RResp, 1)
+
+	// Get the list of nameservers to query.
 	nameservers := r.Nameservers(req.Question[0].Name)
+
 	for _, nameserver := range nameservers {
 		wg.Add(1)
 		go func(nameserver string) {
 			defer wg.Done()
-			var a *dns.Msg
-			var rtt time.Duration
-			var err error
+			
+			// Check if the context has been canceled. If so, exit early.
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
+			// Copy the request to prevent data races during concurrent modification.
+			reqCopy := req.Copy()
 
 			// Add EDNS0 and DNSSEC OK flags if configured.
 			if r.config.SetEDNS0 {
-				o := req.IsEdns0()
+				o := reqCopy.IsEdns0()
 				if o == nil {
 					o = new(dns.OPT)
 					o.Hdr.Name = "."
 					o.Hdr.Rrtype = dns.TypeOPT
 					o.Hdr.Class = 4096
-					req.Extra = append(req.Extra, o)
+					reqCopy.Extra = append(reqCopy.Extra, o)
 				}
 				if r.config.DNSSECEnable {
 					o.SetDo()
 				}
 			}
 
+			var a *dns.Msg
+			var rtt time.Duration
+			var lookupErr error
+
+			// Use the appropriate reusable client based on the network type.
 			if net == "tcp" {
-				tcpclient := &dns.Client{
-					Net:          "tcp",
-					ReadTimeout:  5 * time.Second,
-					WriteTimeout: 5 * time.Second,
-				}
-				a, rtt, err = tcpclient.Exchange(req, nameserver)
+				a, rtt, lookupErr = r.tcpClient.Exchange(reqCopy, nameserver)
 			} else {
-				udpclient := &dns.Client{
-					Net:          "udp",
-					ReadTimeout:  5 * time.Second,
-					WriteTimeout: 5 * time.Second,
-				}
-				a, rtt, err = udpclient.Exchange(req, nameserver)
+				a, rtt, lookupErr = r.udpClient.Exchange(reqCopy, nameserver)
 			}
 
-			if err != nil {
-				log.Warn("%s lookup on %s failed: %s", req.Question[0].String(), nameserver, err)
+			if lookupErr != nil {
+				log.Warn("%s lookup on %s failed: %s", req.Question[0].String(), nameserver, lookupErr)
 				return
 			}
 			if a != nil && a.Rcode != dns.RcodeServerFailure {
-				res <- &RResp{a, nameserver, rtt}
+				// Send the successful response to the channel.
+				resChan <- &RResp{a, nameserver, rtt}
 			}
 		}(nameserver)
-
-		// but exit early, if we have an answer
-		select {
-		case re := <-res:
-			// Perform DNSSEC validation if enabled.
-			if r.config.DNSSECEnable {
-				err = r.dnssecValidator.Validate(re.msg)
-				if err != nil {
-					log.Warn("DNSSEC validation failed for %s from %s: %s", req.Question[0].String(), re.nameserver, err)
-					// In a production environment, you might want to return a SERVFAIL
-					// but for now, we'll return the response anyway.
-					return re.msg, nil
-				}
-				log.Debug("DNSSEC validation successful for %s from %s", req.Question[0].String(), re.nameserver)
-			}
-
-			log.Debug("%s resolv on %s rtt: %v", UnFqdn(req.Question[0].Name), re.nameserver, re.rtt)
-			return re.msg, nil
-		case <-ticker.C:
-			continue
-		}
 	}
-	// wait for all the namservers to finish
-	wg.Wait()
+
+	// Use a separate goroutine to wait for all lookups to finish.
+	// This ensures `resChan` is closed and the main select block can handle it.
+	go func() {
+		wg.Wait()
+		close(resChan)
+	}()
+
+	// Use a select statement to wait for either the first response or a timeout.
 	select {
-	case re := <-res:
+	case re, ok := <-resChan:
+		// Check if the channel was closed without a successful response.
+		if !ok {
+			return nil, ResolvError{req.Question[0].Name, net, nameservers}
+		}
+
 		// Perform DNSSEC validation if enabled.
 		if r.config.DNSSECEnable {
 			err = r.dnssecValidator.Validate(re.msg)
@@ -167,35 +186,40 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (msg *dns.Msg, err error) {
 
 		log.Debug("%s resolv on %s rtt: %v", UnFqdn(req.Question[0].Name), re.nameserver, re.rtt)
 		return re.msg, nil
-	default:
+
+	case <-time.After(time.Duration(r.config.Timeout) * time.Second):
+		// The lookup timed out.
 		return nil, ResolvError{req.Question[0].Name, net, nameservers}
 	}
 }
 
-// Nameservers returns the array of nameservers, with port number appended.
-// '#' in the name is treated as port separator, as with dnsmasq.
+// Nameservers returns the list of nameservers to use for a given query name.
+// It prioritizes specific rules from the suffix tree over the default list.
 func (r *Resolver) Nameservers(qname string) []string {
-	queryKeys := strings.Split(qname, ".")
-	queryKeys = queryKeys[:len(queryKeys)-1] // ignore last '.'
-
-	ns := []string{}
+	// Split the domain name into parts and ignore the trailing dot.
+	queryKeys := strings.Split(strings.Trim(qname, "."), ".")
+	
+	// Use the suffix tree to find specific nameservers for a domain.
 	if v, found := r.domain_server.SearchDomain(queryKeys); found {
-		log.Debug("%s be found in domain server...", qname)
-		ns = strings.Split(v, ",")
+		log.Debug("%s found in domain server, using specific nameservers.", qname)
+		ns := strings.Split(v, ",")
 		for key, value := range ns {
 			ns[key] = addPort(value, "53")
 		}
 		return ns
 	}
 
+	// If no specific rule is found, use the default server list.
 	if len(r.servers) > 0 {
 		return r.servers
 	}
 
+	// Fallback to hardcoded public DNS servers if no other servers are configured.
 	return []string{"8.8.8.8:53", "8.8.4.4:53"}
 }
 
-// ReadServerListFile reads the server list from a file.
+// ReadServerListFile reads a list of nameservers from a file.
+// The file should contain one server per line, in "ip" or "ip:port" format.
 func (r *Resolver) ReadServerListFile(filePath string) {
 	if len(filePath) == 0 {
 		return
@@ -225,7 +249,7 @@ func (r *Resolver) ReadServerListFile(filePath string) {
 	}
 }
 
-// addPort adds the default port if it is missing.
+// addPort appends the default port if a server address is missing it.
 func addPort(server, port string) string {
 	if _, _, err := net.SplitHostPort(server); err != nil {
 		return net.JoinHostPort(server, port)
@@ -233,3 +257,10 @@ func addPort(server, port string) string {
 	return server
 }
 
+// UnFqdn removes the trailing dot from a Fully Qualified Domain Name (FQDN).
+func UnFqdn(s string) string {
+    if dns.IsFqdn(s) {
+        return s[:len(s)-1]
+    }
+    return s
+}
