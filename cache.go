@@ -198,7 +198,7 @@ func (m *MemcachedCache) Full() bool {
 // NewRedisCache creates a new RedisCache instance.
 func NewRedisCache(rs RedisSettings, expire int64) *RedisCache {
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     rs.Addr(),
+		Addr:     rs.Addr, // Corrected: Used the existing Addr field
 		DB:       rs.DB,
 		Password: rs.Password,
 	})
