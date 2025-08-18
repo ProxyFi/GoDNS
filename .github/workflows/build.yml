@@ -54,6 +54,10 @@ jobs:
           - goos: android
             goarch: armv5
           - goos: android
+            goarch: amd64
+          - goos: android
+            goarch: "386"
+          - goos: android
             goarch: mipsle
           - goos: android
             goarch: s390x
