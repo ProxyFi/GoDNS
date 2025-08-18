@@ -11,4 +11,5 @@ var (
 	ErrDNSKEYNotFound   = fmt.Errorf("no matching DNSKEY record found for RRSIG")
 	ErrDSKeyMismatch    = fmt.Errorf("DNSKEY hash does not match DS record digest")
 	ErrEmptyRRset       = fmt.Errorf("cannot validate an empty RRset")
+	ErrSignatureNotYetValid = fmt.Errorf("RRSIG signature is not yet valid")
 )
