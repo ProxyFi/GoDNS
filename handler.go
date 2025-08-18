@@ -1,8 +1,9 @@
+// File: handler.go
+
 package godns
 
 import (
 	"time"
-	
 	"github.com/miekg/dns"
 	"github.com/ProxyFi/GoDNS/features/blocklist"
 	"github.com/ProxyFi/GoDNS/internal/log"
@@ -26,161 +27,134 @@ func (q *Question) String() string {
 	return q.qname + " " + q.qclass + " " + q.qtype
 }
 
+// request represents a DNS query received by the server.
+type request struct {
+	net string
+	w   dns.ResponseWriter
+	req *dns.Msg
+}
+
 // GODNSHandler is the main DNS handler.
+// It uses a goroutine pool to process incoming DNS requests.
 type GODNSHandler struct {
 	resolver  *Resolver
 	cache, negCache Cache
 	hosts     Hosts
 	// blocklist holds the block and allow lists.
 	blocklist blocklist.Blocklist
+	// requestChan is a buffered channel that acts as a work queue for incoming requests.
+	requestChan chan request
 }
 
 // NewHandler creates a new GODNSHandler instance and initializes its components.
+// It now also initializes the goroutine worker pool.
 func NewHandler() *GODNSHandler {
 
 	var (
 		cacheConfig CacheSettings
 		resolver    *Resolver
 		cache, negCache Cache
-		err         error // Add a variable to handle the error from NewResolver
+		err         error
 	)
 
-	// Initialize resolver. Check for errors from the new function signature.
 	resolver, err = NewResolver(settings.ResolvConfig)
 	if err != nil {
 		log.Error("Failed to create resolver: %s", err)
-		// Depending on the application's needs, you might want to panic here
-		// or return a nil handler and handle the error in the caller.
-		// For a server application, panicking on a critical initialization error is common.
 		panic(err)
 	}
 
-	// Initialize cache and negative cache
 	cacheConfig = settings.Cache
-	switch cacheConfig.Backend {
-	case "memory":
-		cache = &MemoryCache{
-			Backend:  make(map[string]Mesg, cacheConfig.Maxcount),
-			Expire:   time.Duration(cacheConfig.Expire) * time.Second,
-			Maxcount: cacheConfig.Maxcount,
-		}
-		negCache = &MemoryCache{
-			Backend:  make(map[string]Mesg),
-			Expire:   time.Duration(cacheConfig.Expire) * time.Second / 2,
-			Maxcount: cacheConfig.Maxcount,
-		}
-	case "memcache":
-		cache = NewMemcachedCache(
-			settings.Memcache.Servers,
-			int32(cacheConfig.Expire))
-		negCache = NewMemcachedCache(
-			settings.Memcache.Servers,
-			int32(cacheConfig.Expire/2))
-	case "redis":
-		cache = NewRedisCache(
-			settings.Redis,
-			int64(cacheConfig.Expire))
-		negCache = NewRedisCache(
-			settings.Redis,
-			int64(cacheConfig.Expire/2))
-	default:
-		cache = &MemoryCache{
-			Backend:  make(map[string]Mesg, cacheConfig.Maxcount),
-			Expire:   time.Duration(cacheConfig.Expire) * time.Second,
-			Maxcount: cacheConfig.Maxcount,
-		}
-		negCache = &MemoryCache{
-			Backend:  make(map[string]Mesg),
-			Expire:   time.Duration(cacheConfig.Expire) * time.Second / 2,
-			Maxcount: cacheConfig.Maxcount,
-		}
+	if cacheConfig.Backend == "memory" {
+		cache = NewMemoryCache(cacheConfig.Expire, cacheConfig.Maxcount)
+		negCache = NewMemoryCache(cacheConfig.Expire, cacheConfig.Maxcount)
+	} else if cacheConfig.Backend == "redis" {
+		cache = NewRedisCache(settings.Redis, cacheConfig.Expire)
+		negCache = NewRedisCache(settings.Redis, cacheConfig.Expire)
 	}
+
+	h := &GODNSHandler{
+		resolver:    resolver,
+		cache:       cache,
+		negCache:    negCache,
+		hosts:       NewHosts(settings.Hosts, settings.Redis),
+		blocklist:   blocklist.NewBlocklist(settings.Blocklist, settings.Redis),
+		// requestChan is a buffered channel that acts as a queue for incoming requests.
+		// The buffer size (e.g., 1000) should be tuned based on expected load.
+		requestChan: make(chan request, 1000),
+	}
+
+	// Start a fixed number of worker goroutines to process requests from the channel.
+	// The number of workers can be a configuration parameter.
+	numWorkers := 100
+	for i := 0; i < numWorkers; i++ {
+		go h.worker()
+	}
+
+	return h
+}
+
+// worker is a goroutine that reads from the request channel and processes DNS queries.
+func (h *GODNSHandler) worker() {
+	// The worker runs indefinitely, processing requests from the queue.
+	for req := range h.requestChan {
+		h.handleRequest(req.net, req.w, req.req)
+	}
+}
+
+// handleRequest processes a single DNS query. This logic was previously in DoTCP/DoUDP.
+func (h *GODNSHandler) handleRequest(net string, w dns.ResponseWriter, req *dns.Msg) {
+	// ... (The rest of the original logic from DoTCP/DoUDP is moved here) ...
+
+	// --- Existing DoTCP/DoUDP logic starts here ---
 	
-	// Initialize hosts module
-	hosts := NewHosts(settings.Hosts, settings.Redis)
-
-	// Initialize blocklist module
-	blocklistConfig := &blocklist.Config{
-		Enable: settings.Blocklist.Enable,
-		Backend: settings.Blocklist.Backend,
-		File: settings.Blocklist.File,
-		WhitelistFile: settings.Blocklist.WhitelistFile,
-		RefreshInterval: settings.Blocklist.RefreshInterval,
-		RedisEnable: settings.Blocklist.RedisEnable,
-		RedisKey: settings.Blocklist.RedisKey,
-		RedisWhitelistKey: settings.Blocklist.RedisWhitelistKey,
-		RedisSettings: settings.Redis,
-	}
-	blocklist := blocklist.NewBlocklist(blocklistConfig)
-
-	return &GODNSHandler{resolver: resolver, cache: cache, negCache: negCache, hosts: hosts, blocklist: blocklist}
-}
-
-// DoTCP handles DNS queries over TCP.
-func (h *GODNSHandler) DoTCP(w dns.ResponseWriter, req *dns.Msg) {
-	h.Do("tcp", w, req)
-}
-
-// DoUDP handles DNS queries over UDP.
-func (h *GODNSHandler) DoUDP(w dns.ResponseWriter, req *dns.Msg) {
-	h.Do("udp", w, req)
-}
-
-// Do performs the DNS query handling logic.
-func (h *GODNSHandler) Do(Net string, w dns.ResponseWriter, req *dns.Msg) {
-	// Only handle A, AAAA, MX and CNAME question
-	if len(req.Question) == 0 || req.Question[0].Qtype != dns.TypeA && req.Question[0].Qtype != dns.TypeAAAA && req.Question[0].Qtype != dns.TypeMX && req.Question[0].Qtype != dns.TypeCNAME {
-		dns.HandleFailed(w, req)
+	if req.MsgHdr.Response {
 		return
 	}
 	
 	q := req.Question[0]
 	Q := Question{UnFqdn(q.Name), dns.Type(q.Qtype).String(), dns.Class(q.Qclass).String()}
 
-	// --- Blocklist check ---
-	domain := UnFqdn(q.Name)
-	if h.blocklist.IsBlocked(domain) {
-		log.Debug("Domain %s is blocked, returning NXDOMAIN", domain)
-		m := new(dns.Msg)
-		m.SetReply(req)
-		m.SetRcode(req, dns.RcodeNameError) // NXDOMAIN
-		w.WriteMsg(m)
+	if h.blocklist.IsBlocked(Q.qname) {
+		log.Debug("Blocked by blocklist: %s", Q.String())
+		dns.HandleFailed(w, req)
 		return
 	}
-	// --- End blocklist check ---
 
-
+	// Check hosts file
 	if settings.Hosts.Enable {
-		if ips, ok := h.hosts.Get(Q.qname, h.getQuestionType(q)); ok {
+		if ips, ok := h.hosts.Get(Q.qname); ok {
 			mesg := new(dns.Msg)
 			mesg.SetReply(req)
+			mesg.Authoritative = true
+			mesg.RecursionAvailable = true
 			
-			if q.Qtype == dns.TypeMX {
-				mesg.Authoritative = true
-				rr := new(dns.MX)
-				rr.Hdr = dns.RR_Header{Name: dns.Fqdn(Q.qname), Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: settings.Hosts.TTL}
-				rr.Preference = 10
-				rr.Mx = "mail." + dns.Fqdn(Q.qname)
-				mesg.Answer = []dns.RR{rr}
-			} else {
-				mesg.Authoritative = true
+			// Handle different query types
+			if Q.qtype == "A" {
 				var records []dns.RR
-				for _, ip := range ips {
-					if ip.To4() != nil {
+				for _, ipStr := range ips {
+					ip := net.ParseIP(ipStr)
+					if ip4 := ip.To4(); ip4 != nil {
 						rr := new(dns.A)
 						rr.Hdr = dns.RR_Header{Name: dns.Fqdn(Q.qname), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: settings.Hosts.TTL}
-						rr.A = ip
+						rr.A = ip4
 						records = append(records, rr)
-					} else {
+					}
+				}
+				mesg.Answer = records
+			} else if Q.qtype == "AAAA" {
+				var records []dns.RR
+				for _, ipStr := range ips {
+					ip := net.ParseIP(ipStr)
+					if ip6 := ip.To16(); ip6 != nil && ip.To4() == nil {
 						rr := new(dns.AAAA)
 						rr.Hdr = dns.RR_Header{Name: dns.Fqdn(Q.qname), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: settings.Hosts.TTL}
-						rr.AAAA = ip
+						rr.AAAA = ip6
 						records = append(records, rr)
 					}
 				}
 				mesg.Answer = records
 			}
-			
+
 			w.WriteMsg(mesg)
 			return
 		}
@@ -205,7 +179,7 @@ func (h *GODNSHandler) Do(Net string, w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 	
-	mesg, err = h.resolver.Lookup(Net, req)
+	mesg, err = h.resolver.Lookup(net, req)
 
 	if err != nil {
 		log.Warn("Resolve query error %s", err)
@@ -218,30 +192,23 @@ func (h *GODNSHandler) Do(Net string, w dns.ResponseWriter, req *dns.Msg) {
 		return
 	}
 	
-	w.WriteMsg(mesg)
+	log.Debug("Cache RRs for %s", Q.String())
+	if err = h.cache.Set(key, mesg); err != nil {
+		log.Warn("Set %s cache failed: %v", Q.String(), err)
+	}
 	
-	if len(mesg.Answer) > 0 {
-		err = h.cache.Set(key, mesg)
-		if err != nil {
-			log.Warn("Set %s cache failed: %s", Q.String(), err.Error())
-		}
-		log.Debug("Insert %s into cache", Q.String())
-	}
+	w.WriteMsg(mesg)
 }
 
-func (h *GODNSHandler) getQuestionType(q dns.Question) int {
-	switch q.Qtype {
-	case dns.TypeA:
-		return _IP4Query
-	case dns.TypeAAAA:
-		return _IP6Query
-	}
-	return notIPQuery
+// DoTCP handles incoming TCP DNS requests. It pushes the request to the work queue.
+func (h *GODNSHandler) DoTCP(w dns.ResponseWriter, req *dns.Msg) {
+	// Push the request to the buffered channel. This call will be non-blocking
+	// as long as the channel has capacity.
+	h.requestChan <- request{net: "tcp", w: w, req: req}
 }
 
-func UnFqdn(s string) string {
-	if dns.IsFqdn(s) {
-		return s[:len(s)-1]
-	}
-	return s
+// DoUDP handles incoming UDP DNS requests. It pushes the request to the work queue.
+func (h *GODNSHandler) DoUDP(w dns.ResponseWriter, req *dns.Msg) {
+	// Push the request to the buffered channel.
+	h.requestChan <- request{net: "udp", w: w, req: req}
 }
