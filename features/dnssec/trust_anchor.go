@@ -4,6 +4,9 @@ package dnssec
 
 import (
 	"fmt"
+	"bufio"
+	"os"
+	"strings"
 
 	"github.com/miekg/dns"
 	"github.com/ProxyFi/GoDNS/internal/log"
