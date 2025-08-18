@@ -44,6 +44,8 @@ type ResolvSettings struct {
 	SetEDNS0       bool
 	ServerListFile string `toml:"server-list-file"`
 	ResolvFile     string `toml:"resolv-file"`
+	// DNSSECEnable enables DNSSEC validation.
+	DNSSECEnable bool `toml:"dnssec-enable"`
 }
 
 // DNSServerSettings holds DNS server-specific configuration.
@@ -54,10 +56,9 @@ type DNSServerSettings struct {
 
 // RedisSettings holds Redis connection configuration.
 type RedisSettings struct {
-	Host     string
-	Port     int
-	DB       int
+	Addr     string
 	Password string
+	DB       int
 }
 
 // MemcacheSettings holds Memcache connection configuration.
@@ -65,19 +66,27 @@ type MemcacheSettings struct {
 	Servers []string
 }
 
-// Addr returns the Redis server address string.
-func (s RedisSettings) Addr() string {
-	return s.Host + ":" + strconv.Itoa(s.Port)
-}
-
-// LogSettings holds logging configuration.
+// LogSettings holds log configuration.
 type LogSettings struct {
 	Stdout bool
 	File   string
 	Level  string
 }
 
-// LogLevel converts a log level string to its integer constant.
+const (
+	// LevelDebug represents the debug log level.
+	LevelDebug = iota
+	// LevelInfo represents the info log level.
+	LevelInfo
+	// LevelNotice represents the notice log level.
+	LevelNotice
+	// LevelWarn represents the warn log level.
+	LevelWarn
+	// LevelError represents the error log level.
+	LevelError
+)
+
+// LogLevel returns the integer constant for the configured log level.
 func (ls LogSettings) LogLevel() int {
 	l, ok := LogLevelMap[ls.Level]
 	if !ok {
@@ -105,15 +114,15 @@ type HostsSettings struct {
 
 // BlocklistSettings holds blocklist configuration.
 type BlocklistSettings struct {
-	Enable          bool
-	Backend         string
-	File            string
-	WhitelistFile   string `toml:"whitelist-file"`
-	RefreshInterval int    `toml:"refresh-interval"`
-	RedisEnable     bool   `toml:"redis-enable"`
-	RedisKey        string `toml:"redis-key"`
+	Enable            bool
+	Backend           string
+	File              string
+	WhitelistFile     string `toml:"whitelist-file"`
+	RefreshInterval   int    `toml:"refresh-interval"`
+	RedisEnable       bool   `toml:"redis-enable"`
+	RedisKey          string `toml:"redis-key"`
 	RedisWhitelistKey string `toml:"redis-whitelist-key"`
-	TTL             uint32
+	TTL               uint32
 }
 
 // init loads the configuration from file.
@@ -127,13 +136,12 @@ func init() {
 
 	_, err := toml.DecodeFile(configFile, &settings)
 	if err != nil {
-		fmt.Printf("Get config file error %s\n", err.Error())
-		os.Exit(2)
+		fmt.Printf("godns: toml decode file failed: %s\n", err)
+		os.Exit(1)
 	}
-	
+
 	if verbose {
 		settings.Log.Level = "DEBUG"
 	}
-
-	initLogger()
 }
+
