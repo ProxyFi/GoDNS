@@ -81,8 +81,27 @@ func (v *DNSSECValidator) Validate(msg *dns.Msg) error {
 	}
 
 	// Verify the RRSIG against the DNSKEY.
-	// We need to pass the DNSKEY as a slice of dns.RR.
-	err := rrsig.Verify(dnskey.PublicKey, msg.Answer)
+	// We need to use the `rrsig.Verify` method with the DNSKEY's public key.
+	// The `PublicKey` field of `dns.DNSKEY` is a string, so we need to convert it to a key type.
+	// However, a direct conversion from string is not possible.
+	// The `rrsig.Verify` method takes the DNSKEY RR itself.
+	// The signature is verified against the RRset and the DNSKEY.
+	// The miekg/dns library's Verify function takes a dns.RR, not a raw key.
+	// So we need to put the dnskey into a slice.
+	// A simpler and more correct way to verify the signature is using the `dnskey.KeyTag()` and a trust anchor.
+	// The `rrsig.Verify` method expects the original message's question section to verify against.
+	// The correct usage is to verify the RRSIG against the records it signs.
+	// First, collect the records that are signed by this RRSIG.
+	// The signed RRset is all records in the Answer section with the same type as rrsig.TypeCovered.
+	rrset := []dns.RR{}
+	for _, rr := range msg.Answer {
+		if rr.Header().Rrtype == rrsig.TypeCovered {
+			rrset = append(rrset, rr)
+		}
+	}
+
+	// Now, verify the signature.
+	err := rrsig.Verify(dnskey, rrset)
 	if err != nil {
 		return fmt.Errorf("RRSIG verification failed: %w", err)
 	}
@@ -118,11 +137,9 @@ func CreateDSFromDNSKEY(dnskey *dns.DNSKEY) (*dns.DS, error) {
 	ds.Algorithm = dnskey.Algorithm
 	ds.DigestType = dns.SHA256
 	// Compute the SHA256 digest of the DNSKEY.
-	hash := sha256.New()
-	if _, err := hash.Write(dnskey.PublicKey); err != nil {
-		return nil, err
-	}
-	ds.Digest = hex.EncodeToString(hash.Sum(nil))
+	// The miekg/dns library has a helper function to create a DS record from a DNSKEY.
+	// We should use that instead of manually doing it.
+	ds = dns.NewDS(dnskey, ds.DigestType)
 	return ds, nil
 }
 
