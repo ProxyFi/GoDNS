@@ -81,7 +81,8 @@ func (v *DNSSECValidator) Validate(msg *dns.Msg) error {
 	}
 
 	// Verify the RRSIG against the DNSKEY.
-	err := rrsig.Verify(dnskey, msg.Answer)
+	// We need to pass the DNSKEY as a slice of dns.RR.
+	err := rrsig.Verify(dnskey.PublicKey, msg.Answer)
 	if err != nil {
 		return fmt.Errorf("RRSIG verification failed: %w", err)
 	}
@@ -118,7 +119,7 @@ func CreateDSFromDNSKEY(dnskey *dns.DNSKEY) (*dns.DS, error) {
 	ds.DigestType = dns.SHA256
 	// Compute the SHA256 digest of the DNSKEY.
 	hash := sha256.New()
-	if _, err := hash.Write(dnskey.Sig); err != nil {
+	if _, err := hash.Write(dnskey.PublicKey); err != nil {
 		return nil, err
 	}
 	ds.Digest = hex.EncodeToString(hash.Sum(nil))
@@ -131,7 +132,7 @@ func CheckDNSSECValidity(msg *dns.Msg) bool {
 	for _, rr := range msg.Answer {
 		if sig, ok := rr.(*dns.RRSIG); ok {
 			// Check if the signature has expired.
-			if time.Now().After(sig.Expiration) {
+			if uint32(time.Now().Unix()) > sig.Expiration {
 				return false
 			}
 		}
