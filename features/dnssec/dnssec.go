@@ -1,8 +1,6 @@
 package dnssec
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -80,17 +78,6 @@ func (v *DNSSECValidator) Validate(msg *dns.Msg) error {
 		return fmt.Errorf("no RRSIG or DNSKEY record found")
 	}
 
-	// Verify the RRSIG against the DNSKEY.
-	// We need to use the `rrsig.Verify` method with the DNSKEY's public key.
-	// The `PublicKey` field of `dns.DNSKEY` is a string, so we need to convert it to a key type.
-	// However, a direct conversion from string is not possible.
-	// The `rrsig.Verify` method takes the DNSKEY RR itself.
-	// The signature is verified against the RRset and the DNSKEY.
-	// The miekg/dns library's Verify function takes a dns.RR, not a raw key.
-	// So we need to put the dnskey into a slice.
-	// A simpler and more correct way to verify the signature is using the `dnskey.KeyTag()` and a trust anchor.
-	// The `rrsig.Verify` method expects the original message's question section to verify against.
-	// The correct usage is to verify the RRSIG against the records it signs.
 	// First, collect the records that are signed by this RRSIG.
 	// The signed RRset is all records in the Answer section with the same type as rrsig.TypeCovered.
 	rrset := []dns.RR{}
@@ -126,20 +113,8 @@ func CreateDSFromDNSKEY(dnskey *dns.DNSKEY) (*dns.DS, error) {
 	if dnskey == nil {
 		return nil, fmt.Errorf("DNSKEY cannot be nil")
 	}
-	ds := new(dns.DS)
-	ds.Hdr = dns.RR_Header{
-		Name:   dnskey.Header().Name,
-		Rrtype: dns.TypeDS,
-		Class:  dns.ClassINET,
-		Ttl:    dnskey.Header().Ttl,
-	}
-	ds.KeyTag = dnskey.KeyTag()
-	ds.Algorithm = dnskey.Algorithm
-	ds.DigestType = dns.SHA256
-	// Compute the SHA256 digest of the DNSKEY.
 	// The miekg/dns library has a helper function to create a DS record from a DNSKEY.
-	// We should use that instead of manually doing it.
-	ds = dns.NewDS(dnskey, ds.DigestType)
+	ds := dnskey.ToDS(dns.SHA256)
 	return ds, nil
 }
 
