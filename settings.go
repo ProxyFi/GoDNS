@@ -8,11 +8,8 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-var (
-	settings Settings
-)
-
 // LogLevelMap maps log level strings to their integer constants.
+// The constants are defined below to ensure type safety and clarity.
 var LogLevelMap = map[string]int{
 	"DEBUG":  LevelDebug,
 	"INFO":   LevelInfo,
@@ -21,7 +18,23 @@ var LogLevelMap = map[string]int{
 	"ERROR":  LevelError,
 }
 
+// Log level constants. These use iota to automatically increment values.
+// The `_` is used for a dummy value if needed, although not strictly necessary here.
+const (
+	// LevelDebug represents the debug log level.
+	LevelDebug = iota
+	// LevelInfo represents the info log level.
+	LevelInfo
+	// LevelNotice represents the notice log level.
+	LevelNotice
+	// LevelWarn represents the warn log level.
+	LevelWarn
+	// LevelError represents the error log level.
+	LevelError
+)
+
 // Settings holds all application-wide configuration.
+// It is the root struct for the TOML configuration file.
 type Settings struct {
 	Version      string
 	Debug        bool
@@ -32,8 +45,7 @@ type Settings struct {
 	Log          LogSettings       `toml:"log"`
 	Cache        CacheSettings     `toml:"cache"`
 	Hosts        HostsSettings     `toml:"hosts"`
-	// BlocklistSettings added to support blocklist configuration.
-	Blocklist BlocklistSettings `toml:"blocklist"`
+	Blocklist    BlocklistSettings `toml:"blocklist"`
 }
 
 // ResolvSettings holds resolver-specific configuration.
@@ -43,8 +55,7 @@ type ResolvSettings struct {
 	SetEDNS0       bool
 	ServerListFile string `toml:"server-list-file"`
 	ResolvFile     string `toml:"resolv-file"`
-	// DNSSECEnable enables DNSSEC validation.
-	DNSSECEnable bool `toml:"dnssec-enable"`
+	DNSSECEnable   bool   `toml:"dnssec-enable"`
 }
 
 // DNSServerSettings holds DNS server-specific configuration.
@@ -72,26 +83,17 @@ type LogSettings struct {
 	Level  string
 }
 
-const (
-	// LevelDebug represents the debug log level.
-	LevelDebug = iota
-	// LevelInfo represents the info log level.
-	LevelInfo
-	// LevelNotice represents the notice log level.
-	LevelNotice
-	// LevelWarn represents the warn log level.
-	LevelWarn
-	// LevelError represents the error log level.
-	LevelError
-)
-
 // LogLevel returns the integer constant for the configured log level.
+// It performs a lookup on the LogLevelMap and panics on an invalid level.
+// This design choice is carried over from the original code.
 func (ls LogSettings) LogLevel() int {
-	l, ok := LogLevelMap[ls.Level]
+	level, ok := LogLevelMap[ls.Level]
 	if !ok {
-		panic("Config error: invalid log level: " + ls.Level)
+		// Use fmt.Errorf to create a structured error message and then panic.
+		// This is a common pattern for handling critical configuration errors.
+		panic(fmt.Errorf("config error: invalid log level '%s'", ls.Level))
 	}
-	return l
+	return level
 }
 
 // CacheSettings holds cache configuration.
@@ -113,34 +115,47 @@ type HostsSettings struct {
 
 // BlocklistSettings holds blocklist configuration.
 type BlocklistSettings struct {
-	Enable            bool
-	Backend           string
-	File              string
-	WhitelistFile     string `toml:"whitelist-file"`
-	RefreshInterval   int    `toml:"refresh-interval"`
-	RedisEnable       bool   `toml:"redis-enable"`
-	RedisKey          string `toml:"redis-key"`
+	Enable          bool
+	Backend         string
+	File            string
+	WhitelistFile   string `toml:"whitelist-file"`
+	RefreshInterval int    `toml:"refresh-interval"`
+	RedisEnable     bool   `toml:"redis-enable"`
+	RedisKey        string `toml:"redis-key"`
 	RedisWhitelistKey string `toml:"redis-whitelist-key"`
-	TTL               uint32
+	TTL             uint32
 }
 
-// init loads the configuration from file.
+// Global variable to hold the application's configuration.
+// It is populated by the `init` function.
+var settings Settings
+
+// init is a special Go function that runs automatically before `main`.
+// It is used here to parse command-line flags and load the configuration file.
 func init() {
 	var configFile string
 	var verbose bool
 
-	flag.StringVar(&configFile, "c", "./etc/godns.conf", "Look for godns toml-formatting config file in this directory")
-	flag.BoolVar(&verbose, "v", false, "verbose log")
+	// Define command-line flags for the configuration file path and verbosity.
+	flag.StringVar(&configFile, "c", "./etc/godns.conf", "Path to the godns toml-formatted config file")
+	flag.BoolVar(&verbose, "v", false, "Enable verbose logging (sets log level to DEBUG)")
+
+	// Parse the command-line flags.
 	flag.Parse()
 
-	_, err := toml.DecodeFile(configFile, &settings)
-	if err != nil {
-		fmt.Printf("godns: toml decode file failed: %s\n", err)
+	// Decode the TOML configuration file into the global settings variable.
+	// We use a clean file path directly from the flag.
+	if _, err := toml.DecodeFile(configFile, &settings); err != nil {
+		// Use a more idiomatic and robust way to handle errors.
+		// fmt.Fprintf is used to print to standard error (os.Stderr).
+		// This separates log output from standard output, which is a good practice.
+		fmt.Fprintf(os.Stderr, "godns: toml decode file failed: %v\n", err)
 		os.Exit(1)
 	}
 
+	// Override the log level to DEBUG if the -v flag is set.
+	// This logic is preserved from the original code.
 	if verbose {
 		settings.Log.Level = "DEBUG"
 	}
 }
-
