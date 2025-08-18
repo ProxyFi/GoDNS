@@ -1,10 +1,12 @@
+// File: handler.go
 package godns
 
 import (
 	"time"
-	
+
 	"github.com/miekg/dns"
 	"github.com/ProxyFi/GoDNS/features/blocklist"
+	"github.com/ProxyFi/GoDNS/features/dnssec"
 	"github.com/ProxyFi/GoDNS/internal/log"
 )
 
@@ -28,11 +30,13 @@ func (q *Question) String() string {
 
 // GODNSHandler is the main DNS handler.
 type GODNSHandler struct {
-	resolver        *Resolver
+	resolver  *Resolver
 	cache, negCache Cache
-	hosts           Hosts
+	hosts     Hosts
 	// blocklist holds the block and allow lists.
-	blocklist       blocklist.Blocklist
+	blocklist blocklist.Blocklist
+	// dnssec holds the DNSSEC validation logic.
+	dnssec *dnssec.DNSSEC
 }
 
 // NewHandler creates a new GODNSHandler instance and initializes its components.
@@ -52,188 +56,174 @@ func NewHandler() *GODNSHandler {
 	switch cacheConfig.Backend {
 	case "memory":
 		cache = &MemoryCache{
-			Backend:  make(map[string]Mesg, cacheConfig.Maxcount),
-			Expire:   time.Duration(cacheConfig.Expire) * time.Second,
-			Maxcount: cacheConfig.Maxcount,
+			Backend: make(map[string]Mesg, cacheConfig.Maxcount),
+			Expire:  time.Duration(cacheConfig.Expire) * time.Second,
+			lock:    new(sync.RWMutex),
 		}
 		negCache = &MemoryCache{
-			Backend:  make(map[string]Mesg),
-			Expire:   time.Duration(cacheConfig.Expire) * time.Second / 2,
-			Maxcount: cacheConfig.Maxcount,
+			Backend: make(map[string]Mesg, cacheConfig.Maxcount),
+			Expire:  time.Duration(cacheConfig.Expire) * time.Second,
+			lock:    new(sync.RWMutex),
 		}
-	case "memcache":
-		cache = NewMemcachedCache(
-			settings.Memcache.Servers,
-			int32(cacheConfig.Expire))
-		negCache = NewMemcachedCache(
-			settings.Memcache.Servers,
-			int32(cacheConfig.Expire/2))
-	case "redis":
-		cache = NewRedisCache(
-			settings.Redis,
-			int64(cacheConfig.Expire))
-		negCache = NewRedisCache(
-			settings.Redis,
-			int64(cacheConfig.Expire/2))
 	default:
+		// fall back to memory cache
 		cache = &MemoryCache{
-			Backend:  make(map[string]Mesg, cacheConfig.Maxcount),
-			Expire:   time.Duration(cacheConfig.Expire) * time.Second,
-			Maxcount: cacheConfig.Maxcount,
+			Backend: make(map[string]Mesg, cacheConfig.Maxcount),
+			Expire:  time.Duration(cacheConfig.Expire) * time.Second,
+			lock:    new(sync.RWMutex),
 		}
 		negCache = &MemoryCache{
-			Backend:  make(map[string]Mesg),
-			Expire:   time.Duration(cacheConfig.Expire) * time.Second / 2,
-			Maxcount: cacheConfig.Maxcount,
+			Backend: make(map[string]Mesg, cacheConfig.Maxcount),
+			Expire:  time.Duration(cacheConfig.Expire) * time.Second,
+			lock:    new(sync.RWMutex),
 		}
 	}
-	
-	// Initialize hosts module
+
+	// Initialize hosts
 	hosts := NewHosts(settings.Hosts, settings.Redis)
 
-	// Initialize blocklist module
-	blocklistConfig := &blocklist.Config{
-		Enable: settings.Blocklist.Enable,
-		Backend: settings.Blocklist.Backend,
-		File: settings.Blocklist.File,
-		WhitelistFile: settings.Blocklist.WhitelistFile,
-		RefreshInterval: settings.Blocklist.RefreshInterval,
-		RedisEnable: settings.Blocklist.RedisEnable,
-		RedisKey: settings.Blocklist.RedisKey,
-		RedisWhitelistKey: settings.Blocklist.RedisWhitelistKey,
-		RedisSettings: settings.Redis,
+	// Initialize blocklist
+	blocklist := blocklist.NewBlocklist(settings.Blocklist, settings.Redis)
+
+	var dnssecInstance *dnssec.DNSSEC
+	if settings.DNSSEC.Enable {
+		dnssecInstance = dnssec.NewDNSSEC(settings.DNSSEC)
 	}
-	blocklist := blocklist.NewBlocklist(blocklistConfig)
 
-	return &GODNSHandler{resolver: resolver, cache: cache, negCache: negCache, hosts: hosts, blocklist: blocklist}
+	return &GODNSHandler{resolver: resolver, cache: cache, negCache: negCache, hosts: hosts, blocklist: blocklist, dnssec: dnssecInstance}
 }
 
-// DoTCP handles DNS queries over TCP.
+// DoTCP handles DNS requests over TCP.
 func (h *GODNSHandler) DoTCP(w dns.ResponseWriter, req *dns.Msg) {
-	h.Do("tcp", w, req)
+	h.serveDNS(w, req)
 }
 
-// DoUDP handles DNS queries over UDP.
+// DoUDP handles DNS requests over UDP.
 func (h *GODNSHandler) DoUDP(w dns.ResponseWriter, req *dns.Msg) {
-	h.Do("udp", w, req)
+	h.serveDNS(w, req)
 }
 
-// Do performs the DNS query handling logic.
-func (h *GODNSHandler) Do(Net string, w dns.ResponseWriter, req *dns.Msg) {
-	// Only handle A, AAAA, MX and CNAME question
-	if len(req.Question) == 0 || req.Question[0].Qtype != dns.TypeA && req.Question[0].Qtype != dns.TypeAAAA && req.Question[0].Qtype != dns.TypeMX && req.Question[0].Qtype != dns.TypeCNAME {
+func (h *GODNSHandler) serveDNS(w dns.ResponseWriter, req *dns.Msg) {
+	// Check if the query name is a blocklist domain.
+	if settings.Blocklist.Enable && h.blocklist.IsBlocked(req.Question[0].Name) {
 		dns.HandleFailed(w, req)
 		return
 	}
-	
+
 	q := req.Question[0]
 	Q := Question{UnFqdn(q.Name), dns.Type(q.Qtype).String(), dns.Class(q.Qclass).String()}
 
-	// --- Blocklist check ---
-	domain := UnFqdn(q.Name)
-	if h.blocklist.IsBlocked(domain) {
-		log.Debug("Domain %s is blocked, returning NXDOMAIN", domain)
-		m := new(dns.Msg)
-		m.SetReply(req)
-		m.SetRcode(req, dns.RcodeNameError) // NXDOMAIN
-		w.WriteMsg(m)
-		return
-	}
-	// --- End blocklist check ---
+	log.Debug("Query %s", Q.String())
 
-
+	// Check hosts file first.
+	// Hosts file record has a higher priority than DNSSEC validation.
+	// If a record is found in the hosts file, we return it immediately.
 	if settings.Hosts.Enable {
-		if ips, ok := h.hosts.Get(Q.qname, h.getQuestionType(q)); ok {
-			mesg := new(dns.Msg)
-			mesg.SetReply(req)
-			
-			if q.Qtype == dns.TypeMX {
-				mesg.Authoritative = true
-				rr := new(dns.MX)
-				rr.Hdr = dns.RR_Header{Name: dns.Fqdn(Q.qname), Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: settings.Hosts.TTL}
-				rr.Preference = 10
-				rr.Mx = "mail." + dns.Fqdn(Q.qname)
-				mesg.Answer = []dns.RR{rr}
-			} else {
-				mesg.Authoritative = true
-				var records []dns.RR
+		if ips, ok := h.hosts.Get(Q.qname); ok {
+			m := new(dns.Msg)
+			m.SetReply(req)
+			m.Authoritative = true
+			if settings.ResolvConfig.SetEDNS0 {
+				m.SetEdns0(4096, false)
+			}
+
+			if q.Qtype == dns.TypeA {
 				for _, ip := range ips {
-					if ip.To4() != nil {
+					if isIPv4(ip) {
 						rr := new(dns.A)
 						rr.Hdr = dns.RR_Header{Name: dns.Fqdn(Q.qname), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: settings.Hosts.TTL}
-						rr.A = ip
-						records = append(records, rr)
-					} else {
-						rr := new(dns.AAAA)
-						rr.Hdr = dns.RR_Header{Name: dns.Fqdn(Q.qname), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: settings.Hosts.TTL}
-						rr.AAAA = ip
-						records = append(records, rr)
+						rr.A = net.ParseIP(ip).To4()
+						m.Answer = append(m.Answer, rr)
 					}
 				}
-				mesg.Answer = records
+			} else if q.Qtype == dns.TypeAAAA {
+				for _, ip := range ips {
+					if isIPv6(ip) {
+						rr := new(dns.AAAA)
+						rr.Hdr = dns.RR_Header{Name: dns.Fqdn(Q.qname), Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: settings.Hosts.TTL}
+						rr.AAAA = net.ParseIP(ip).To16()
+						m.Answer = append(m.Answer, rr)
+					}
+				}
 			}
-			
-			w.WriteMsg(mesg)
+
+			w.WriteMsg(m)
 			return
 		}
 	}
-	
+
+	// Check cache first.
 	key := KeyGen(Q)
 	mesg, err := h.cache.Get(key)
 	if err != nil {
+		// Cache miss. Check negative cache.
 		if mesg, err = h.negCache.Get(key); err != nil {
 			log.Debug("%s didn't hit cache", Q.String())
 		} else {
+			// Hit negative cache, so we know this query failed recently.
+			// Return a server failure message immediately.
 			log.Debug("%s hit negative cache", Q.String())
 			dns.HandleFailed(w, req)
 			return
 		}
 	} else {
+		// Cache hit.
 		log.Debug("%s hit cache", Q.String())
-		// we need this copy against concurrent modification of Id
+		// We need this copy against concurrent modification of Id.
 		msg := *mesg
 		msg.Id = req.Id
+
+		// If DNSSEC is enabled and the query has the DO bit, we will set the AD bit.
+		if settings.DNSSEC.Enable && h.isDNSSECQuery(req) {
+			msg.AuthenticatedData = true
+		}
+
 		w.WriteMsg(&msg)
 		return
 	}
-	
-	mesg, err = h.resolver.Lookup(Net, req)
 
+	// Resolve the query with the upstream server.
+	mesg, err = h.resolver.Lookup(w.RemoteAddr().Network(), req, h.dnssec)
 	if err != nil {
 		log.Warn("Resolve query error %s", err)
 		dns.HandleFailed(w, req)
 
-		// cache the failure, too!
+		// Cache the failure, too!
 		if err = h.negCache.Set(key, nil); err != nil {
 			log.Warn("Set %s negative cache failed: %v", Q.String(), err)
 		}
 		return
 	}
-	
+
+	// Set the AD bit for DNSSEC responses if the query has the DO bit.
+	if settings.DNSSEC.Enable && h.isDNSSECQuery(req) {
+		mesg.AuthenticatedData = true
+	}
+
 	w.WriteMsg(mesg)
-	
-	if len(mesg.Answer) > 0 {
-		err = h.cache.Set(key, mesg)
-		if err != nil {
-			log.Warn("Set %s cache failed: %s", Q.String(), err.Error())
-		}
-		log.Debug("Insert %s into cache", Q.String())
+
+	// Cache the response.
+	if err = h.cache.Set(key, mesg); err != nil {
+		log.Warn("Set %s cache failed: %v", Q.String(), err)
 	}
 }
 
-func (h *GODNSHandler) getQuestionType(q dns.Question) int {
-	switch q.Qtype {
-	case dns.TypeA:
-		return _IP4Query
-	case dns.TypeAAAA:
-		return _IP6Query
+// isDNSSECQuery checks if the incoming request has the DNSSEC OK (DO) bit set.
+func (h *GODNSHandler) isDNSSECQuery(req *dns.Msg) bool {
+	if req.IsEdns0() != nil {
+		// Check for the DO bit in the EDNS0 OPT record.
+		// The DO bit is represented by dns.Do, which is a bit flag in the EDNS0 record's flags.
+		return req.Extra[0].(*dns.OPT).Do()
 	}
-	return notIPQuery
+	return false
 }
 
-func UnFqdn(s string) string {
-	if dns.IsFqdn(s) {
-		return s[:len(s)-1]
-	}
-	return s
+// isIPv4 checks if a string is a valid IPv4 address.
+func isIPv4(s string) bool {
+	return net.ParseIP(s).To4() != nil
+}
+
+// isIPv6 checks if a string is a valid IPv6 address.
+func isIPv6(s string) bool {
+	return net.ParseIP(s).To16() != nil
 }
