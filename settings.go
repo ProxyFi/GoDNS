@@ -1,3 +1,5 @@
+// File: settings.go
+
 package godns
 
 import (
@@ -36,14 +38,15 @@ type Settings struct {
 
 // ResolvSettings holds resolver-specific configuration.
 type ResolvSettings struct {
-	Timeout        int
-	Interval       int
-	SetEDNS0       bool
-	ServerListFile string `toml:"server-list-file"`
-	ResolvFile     string `toml:"resolv-file"`
-	DNSSECEnable   bool   `toml:"dnssec-enable"`
+	Timeout         int
+	Interval        int
+	SetEDNS0        bool
+	ServerListFile  string `toml:"server-list-file"`
+	ResolvFile      string `toml:"resolv-file"`
+	DNSSECEnable    bool   `toml:"dnssec-enable"`
 	TrustAnchorFile string `toml:"trust-anchor-file"`
-	EnableLatencyBasedLoadBalancing bool `toml:"enable-latency-based-load-balancing"`
+	// LoadBalanceEnable controls whether latency-based load balancing is active.
+	LoadBalanceEnable bool `toml:"load-balance-enable"`
 }
 
 // DNSServerSettings holds DNS server-specific configuration.
@@ -103,15 +106,15 @@ type HostsSettings struct {
 
 // BlocklistSettings holds blocklist configuration.
 type BlocklistSettings struct {
-	Enable          bool
-	Backend         string
-	File            string
-	WhitelistFile   string `toml:"whitelist-file"`
-	RefreshInterval int    `toml:"refresh-interval"`
-	RedisEnable     bool   `toml:"redis-enable"`
-	RedisKey        string `toml:"redis-key"`
+	Enable            bool
+	Backend           string
+	File              string
+	WhitelistFile     string `toml:"whitelist-file"`
+	RefreshInterval   int    `toml:"refresh-interval"`
+	RedisEnable       bool   `toml:"redis-enable"`
+	RedisKey          string `toml:"redis-key"`
 	RedisWhitelistKey string `toml:"redis-whitelist-key"`
-	TTL             uint32
+	TTL               uint32
 }
 
 // Global variable to hold the application's configuration.
