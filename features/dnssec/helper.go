@@ -70,3 +70,15 @@ func findDNSKEYForRRSIG(rrset []dns.RR, rrsig *dns.RRSIG) *dns.DNSKEY {
 	}
 	return nil
 }
+
+func parent(s string) string {
+    // Remove the trailing dot if it exists.
+    s = dns.Fqdn(s)
+    
+    // Find the first dot and return the rest of the string.
+    if i := dns.Split(s); len(i) > 1 {
+        return s[i[1]:]
+    }
+    
+    return ""
+}
