@@ -33,7 +33,7 @@ func NewHosts(hs HostsSettings, rs RedisSettings) Hosts {
 	var redisHosts *RedisHosts
 	if hs.RedisEnable {
 		rdb := redis.NewClient(&redis.Options{
-			Addr:     rs.Addr(),
+			Addr:     net.JoinHostPort(rs.Host, fmt.Sprintf("%d", rs.Port)),
 			DB:       rs.DB,
 			Password: rs.Password,
 		})
