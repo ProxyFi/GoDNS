@@ -179,7 +179,7 @@ func (r *Resolver) Nameservers(qname string) []string {
 	queryKeys = queryKeys[:len(queryKeys)-1] // ignore last '.'
 
 	ns := []string{}
-	if v, found := r.domain_server.search(queryKeys); found {
+	if v, found := r.domain_server.SearchDomain(queryKeys); found {
 		log.Debug("%s be found in domain server...", qname)
 		ns = strings.Split(v, ",")
 		for key, value := range ns {
