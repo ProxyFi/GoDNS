@@ -51,12 +51,20 @@ type Resolver struct {
 
 // NewResolver creates and initializes a new Resolver instance.
 // It sets up DNS clients and loads server lists from configured files.
-func NewResolver(c ResolvSettings) *Resolver {
+// This function now returns an error if DNSSEC trust anchors cannot be loaded.
+func NewResolver(c ResolvSettings) (*Resolver, error) {
+	// Initialize the DNSSEC validator.
+	// This call now includes the trust anchor file path from ResolvSettings.
+	dnssecValidator, err := dnssec.NewDNSSECValidator(c.TrustAnchorFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize DNSSEC validator: %w", err)
+	}
+
 	r := &Resolver{
 		servers:       []string{},
 		domain_server: newSuffixTreeRoot(),
 		config:        &c,
-		dnssecValidator: dnssec.NewDNSSECValidator(),
+		dnssecValidator: dnssecValidator,
 		// Initialize reusable DNS clients with timeouts.
 		udpClient: &dns.Client{
 			Net:          "udp",
@@ -89,7 +97,7 @@ func NewResolver(c ResolvSettings) *Resolver {
 		}
 	}
 
-	return r
+	return r, nil
 }
 
 // Lookup performs a DNS query to the upstream nameservers.

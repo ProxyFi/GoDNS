@@ -56,6 +56,7 @@ type ResolvSettings struct {
 	ServerListFile string `toml:"server-list-file"`
 	ResolvFile     string `toml:"resolv-file"`
 	DNSSECEnable   bool   `toml:"dnssec-enable"`
+	TrustAnchorFile string `toml:"trust-anchor-file"`
 }
 
 // DNSServerSettings holds DNS server-specific configuration.

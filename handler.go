@@ -28,11 +28,11 @@ func (q *Question) String() string {
 
 // GODNSHandler is the main DNS handler.
 type GODNSHandler struct {
-	resolver        *Resolver
+	resolver  *Resolver
 	cache, negCache Cache
-	hosts           Hosts
+	hosts     Hosts
 	// blocklist holds the block and allow lists.
-	blocklist       blocklist.Blocklist
+	blocklist blocklist.Blocklist
 }
 
 // NewHandler creates a new GODNSHandler instance and initializes its components.
@@ -42,10 +42,18 @@ func NewHandler() *GODNSHandler {
 		cacheConfig CacheSettings
 		resolver    *Resolver
 		cache, negCache Cache
+		err         error // Add a variable to handle the error from NewResolver
 	)
 
-	// Initialize resolver
-	resolver = NewResolver(settings.ResolvConfig)
+	// Initialize resolver. Check for errors from the new function signature.
+	resolver, err = NewResolver(settings.ResolvConfig)
+	if err != nil {
+		log.Error("Failed to create resolver: %s", err)
+		// Depending on the application's needs, you might want to panic here
+		// or return a nil handler and handle the error in the caller.
+		// For a server application, panicking on a critical initialization error is common.
+		panic(err)
+	}
 
 	// Initialize cache and negative cache
 	cacheConfig = settings.Cache

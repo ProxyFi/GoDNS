@@ -24,15 +24,25 @@ type DNSSECValidator struct {
 
 // NewDNSSECValidator creates a new DNSSECValidator instance.
 // It initializes the trust anchor manager and the DS record cache.
-// A production application must load trust anchors from a secure,
-// trusted source, such as the IANA root trust anchor file.
-func NewDNSSECValidator() *DNSSECValidator {
+// If a trust anchor file path is provided, it attempts to load the anchors from it.
+// It returns an error if the file cannot be loaded.
+func NewDNSSECValidator(trustAnchorFilePath string) (*DNSSECValidator, error) {
 	v := &DNSSECValidator{
 		trustAnchors: NewTrustAnchorManager(),
 		dsCache:      NewDNSSECCache(),
 	}
-	log.Warn("DNSSEC validator is initialized without a trust anchor. All validation will fail until a trust anchor is added.")
-	return v
+
+	// Attempt to load trust anchors from the provided file path.
+	if trustAnchorFilePath != "" {
+		if err := v.trustAnchors.LoadFromFile(trustAnchorFilePath); err != nil {
+			return nil, fmt.Errorf("failed to load trust anchors: %w", err)
+		}
+	} else {
+		// If no path is provided, log a warning as validation will fail.
+		log.Warn("DNSSEC validator is initialized without a trust anchor. All validation will fail until a trust anchor is added.")
+	}
+
+	return v, nil
 }
 
 // AddTrustAnchor adds a trust anchor to the validator's trust store.
