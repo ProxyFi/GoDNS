@@ -12,11 +12,11 @@ import (
 // LogLevelMap maps log level strings to their integer constants.
 // The constants are defined below to ensure type safety and clarity.
 var LogLevelMap = map[string]int{
-	"DEBUG":  log.LevelDebug,
-	"INFO":   log.LevelInfo,
+	"DEBUG": log.LevelDebug,
+	"INFO": log.LevelInfo,
 	"NOTICE": log.LevelNotice,
-	"WARN":   log.LevelWarn,
-	"ERROR":  log.LevelError,
+	"WARN": log.LevelWarn,
+	"ERROR": log.LevelError,
 }
 
 // Settings holds all application-wide configuration.
@@ -36,81 +36,79 @@ type Settings struct {
 
 // ResolvSettings holds resolver-specific configuration.
 type ResolvSettings struct {
-	Timeout        int
-	Interval       int
-	SetEDNS0       bool
-	ServerListFile string `toml:"server-list-file"`
-	ResolvFile     string `toml:"resolv-file"`
-	DNSSECEnable   bool   `toml:"dnssec-enable"`
-	TrustAnchorFile string `toml:"trust-anchor-file"`
+	Timeout                      int
+	Interval                     int
+	SetEDNS0                     bool
+	ServerListFile               string `toml:"server-list-file"`
+	ResolvFile                   string `toml:"resolv-file"`
+	DNSSECEnable                 bool   `toml:"dnssec-enable"`
+	TrustAnchorFile              string `toml:"trust-anchor-file"`
+	Servers                      []string
+	EnableLatencyBasedLoadBalancing bool `toml:"enable-latency-based-load-balancing"`
 }
 
-// DNSServerSettings holds DNS server-specific configuration.
-type DNSServerSettings struct {
-	Host string
-	Port int
+// CacheSettings holds cache configuration.
+type CacheSettings struct {
+	Enable      bool
+	Expire      int
+	Maxcount    int `toml:"max-count"`
+	Type        string
+	ShortExpire int `toml:"short-expire"`
 }
 
-// RedisSettings holds Redis connection configuration.
+// MemcacheSettings holds memcache configuration.
+type MemcacheSettings struct {
+	Servers []string
+}
+
+// HostsSettings holds hosts configuration.
+type HostsSettings struct {
+	HostsFile       string `toml:"hosts-file"`
+	RedisEnable     bool   `toml:"redis-enable"`
+	RedisKey        string `toml:"redis-key"`
+	RedisWhitelistKey string `toml:"redis-whitelist-key"`
+	RefreshInterval int    `toml:"refresh-interval"`
+	TTL             uint32
+}
+
+// BlocklistSettings holds blocklist configuration.
+type BlocklistSettings struct {
+	BlocklistFile string `toml:"blocklist-file"`
+	AllowlistFile string `toml:"allowlist-file"`
+	Interval      int
+	RedisEnable     bool   `toml:"redis-enable"`
+	RedisKey        string `toml:"redis-key"`
+	RedisWhitelistKey string `toml:"redis-whitelist-key"`
+	TTL             uint32
+}
+
+// RedisSettings holds Redis configuration.
 type RedisSettings struct {
 	Addr     string
 	Password string
 	DB       int
 }
 
-// MemcacheSettings holds Memcache connection configuration.
-type MemcacheSettings struct {
-	Servers []string
+// DNSServerSettings holds DNS server configuration.
+type DNSServerSettings struct {
+	Host string
+	Port int
 }
 
-// LogSettings holds log configuration.
+// LogSettings holds logging configuration.
 type LogSettings struct {
-	Stdout bool
-	File   string
-	Level  string
+	Stdout   bool
+	File     string
+	Level    string
 }
 
-// LogLevel returns the integer constant for the configured log level.
-// It performs a lookup on the LogLevelMap and panics on an invalid level.
-// This design choice is carried over from the original code.
-func (ls LogSettings) LogLevel() int {
-	level, ok := LogLevelMap[ls.Level]
+// LogLevel returns the integer representation of the log level string.
+func (l *LogSettings) LogLevel() int {
+	level, ok := LogLevelMap[l.Level]
 	if !ok {
-		// Use fmt.Errorf to create a structured error message and then panic.
-		// This is a common pattern for handling critical configuration errors.
-		panic(fmt.Errorf("config error: invalid log level '%s'", ls.Level))
+		return log.LevelInfo // Default to INFO level if not specified.
 	}
 	return level
-}
-
-// CacheSettings holds cache configuration.
-type CacheSettings struct {
-	Backend  string
-	Expire   int
-	Maxcount int
-}
-
-// HostsSettings holds hosts file configuration.
-type HostsSettings struct {
-	Enable          bool
-	HostsFile       string `toml:"host-file"`
-	RedisEnable     bool   `toml:"redis-enable"`
-	RedisKey        string `toml:"redis-key"`
-	TTL             uint32 `toml:"ttl"`
-	RefreshInterval uint32 `toml:"refresh-interval"`
-}
-
-// BlocklistSettings holds blocklist configuration.
-type BlocklistSettings struct {
-	Enable          bool
-	Backend         string
-	File            string
-	WhitelistFile   string `toml:"whitelist-file"`
-	RefreshInterval int    `toml:"refresh-interval"`
-	RedisEnable     bool   `toml:"redis-enable"`
-	RedisKey        string `toml:"redis-key"`
-	RedisWhitelistKey string `toml:"redis-whitelist-key"`
-	TTL             uint32
 }
 
 // Global variable to hold the application's configuration.
@@ -141,7 +139,6 @@ func init() {
 	}
 
 	// Override the log level to DEBUG if the -v flag is set.
-	// This logic is preserved from the original code.
 	if verbose {
 		settings.Log.Level = "DEBUG"
 	}
