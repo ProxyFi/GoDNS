@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -77,8 +76,6 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (msg *dns.Msg, err error) {
 	var wg sync.WaitGroup
 	// Use a channel to get the first successful response.
 	res := make(chan *RResp, 1)
-	// Use a timer to handle timeouts.
-	t := time.NewTimer(time.Duration(r.config.Timeout) * time.Second)
 	// Use a ticker to query nameservers periodically.
 	ticker := time.NewTicker(time.Duration(r.config.Interval) * time.Millisecond)
 	defer ticker.Stop()
@@ -95,11 +92,17 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (msg *dns.Msg, err error) {
 
 			// Add EDNS0 and DNSSEC OK flags if configured.
 			if r.config.SetEDNS0 {
-				req.SetEdns0(4096, true)
-			}
-			// Add DNSSEC OK (DO) flag.
-			if r.config.DNSSECEnable {
-				req.SetEdns0(4096, true).SetDo()
+				o := req.IsEdns0()
+				if o == nil {
+					o = new(dns.OPT)
+					o.Hdr.Name = "."
+					o.Hdr.Rrtype = dns.TypeOPT
+					o.Hdr.Class = 4096
+					req.Extra = append(req.Extra, o)
+				}
+				if r.config.DNSSECEnable {
+					o.SetDo()
+				}
 			}
 
 			if net == "tcp" {
