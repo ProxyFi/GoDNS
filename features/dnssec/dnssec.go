@@ -3,6 +3,7 @@
 package dnssec
 
 import (
+	"bytes" // Added for digest comparison
 	"fmt"
 	"time"
 
@@ -135,13 +136,15 @@ func (v *DNSSECValidator) validateChain(dnskey *dns.DNSKEY) error {
 	}
 
 	// Validate the DNSKEY against the fetched DS record.
-	if !parentDS.ToDNSKEY(dnskey, dns.SHA256) {
+	// This is done by generating a DS record from the DNSKEY and comparing digests.
+	generatedDS := dnskey.ToDS(dns.SHA256)
+	if !bytes.Equal(parentDS.Digest, generatedDS.Digest) {
 		return ErrDSKeyMismatch
 	}
 
 	// The DS record is signed, so we need to recursively validate its
 	// signing key, which is located in the grand-parent zone.
-	parentZone := dns.Fqdn(dns.DomainName(dnskey.Header().Name).Parent())
+	parentZone := dns.Fqdn(dns.Parent(dnskey.Header().Name))
 	grandParentMsg := &dns.Msg{}
 	grandParentMsg.SetQuestion(parentZone, dns.TypeDS)
 	// Here, we would perform a recursive DNS query to get the parent's DS record.
@@ -173,7 +176,7 @@ func (v *DNSSECValidator) fetchDS(zone string) (*dns.DS, error) {
 	// We'll create a dummy DS record for this example.
 	dnskey := &dns.DNSKEY{
 		Hdr:       dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET},
-		Flags:     dns.DNSKEYFlagSEP | dns.DNSKEYFlagZone,
+		Flags:     257, // Corrected to use literal value to avoid build error
 		Protocol:  3,
 		Algorithm: dns.ECDSAP256SHA256,
 		PublicKey: "AwEAAcyKqA==",
@@ -188,7 +191,7 @@ func (v *DNSSECValidator) fetchDS(zone string) (*dns.DS, error) {
 		keyTag:      ds.KeyTag,
 		algorithm:   ds.Algorithm,
 		digestType:  ds.DigestType,
-		digest:      ds.Digest,
+		digest:      []byte(ds.Digest), // Corrected type conversion
 		delegation:  ds,
 		chain:       []*dns.DS{}, // A real implementation would build this chain
 	})
