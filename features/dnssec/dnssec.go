@@ -144,7 +144,7 @@ func (v *DNSSECValidator) validateChain(dnskey *dns.DNSKEY) error {
 
 	// The DS record is signed, so we need to recursively validate its
 	// signing key, which is located in the grand-parent zone.
-	parentZone := dns.Fqdn(dns.Parent(dnskey.Header().Name))
+	parentZone := dns.Fqdn(dns.Name(dnskey.Header().Name).Parent())
 	grandParentMsg := &dns.Msg{}
 	grandParentMsg.SetQuestion(parentZone, dns.TypeDS)
 	// Here, we would perform a recursive DNS query to get the parent's DS record.
@@ -191,7 +191,7 @@ func (v *DNSSECValidator) fetchDS(zone string) (*dns.DS, error) {
 		keyTag:      ds.KeyTag,
 		algorithm:   ds.Algorithm,
 		digestType:  ds.DigestType,
-		digest:      []byte(ds.Digest), // Corrected type conversion
+		digest:      ds.Digest, // Corrected type conversion
 		delegation:  ds,
 		chain:       []*dns.DS{}, // A real implementation would build this chain
 	})
