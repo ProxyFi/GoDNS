@@ -12,5 +12,5 @@ import (
 // This design pattern separates the package logic (godns) from the
 // executable entry point (cmd/main.go).
 func main() {
-	godns.main()
+	godns.Run()
 }
