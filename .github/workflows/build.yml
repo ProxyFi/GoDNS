@@ -1,0 +1,160 @@
+# .github/workflows/build.yml
+
+name: Go Cross-Platform Build and Release
+
+on:
+  release:
+    types: [ created ]
+
+# This job builds the binaries for all platforms and uploads them as artifacts.
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to upload artifacts
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Define the build matrix with platform and architecture.
+        # This is based on the list you provided.
+        goos: [windows, darwin, linux, android, freebsd]
+        goarch: [amd64, "386", arm, arm64, armv5, mipsle, s390x, riscv64, loong64, amd64-avx]
+        
+        # We need to filter out unsupported combinations.
+        exclude:
+          - goos: windows
+            goarch: arm
+          - goos: windows
+            goarch: armv5
+          - goos: windows
+            goarch: mipsle
+          - goos: windows
+            goarch: s390x
+          - goos: windows
+            goarch: riscv64
+          - goos: windows
+            goarch: loong64
+          - goos: darwin
+            goarch: "386"
+          - goos: darwin
+            goarch: arm
+          - goos: darwin
+            goarch: armv5
+          - goos: darwin
+            goarch: mipsle
+          - goos: darwin
+            goarch: s390x
+          - goos: darwin
+            goarch: riscv64
+          - goos: darwin
+            goarch: loong64
+          - goos: android
+            goarch: arm
+          - goos: android
+            goarch: armv5
+          - goos: android
+            goarch: mipsle
+          - goos: android
+            goarch: s390x
+          - goos: android
+            goarch: riscv64
+          - goos: android
+            goarch: loong64
+          - goos: android
+            goarch: amd64-avx
+          - goos: freebsd
+            goarch: mipsle
+          - goos: freebsd
+            goarch: s390x
+          - goos: freebsd
+            goarch: riscv64
+          - goos: freebsd
+            goarch: loong64
+          - goos: freebsd
+            goarch: amd64-avx
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22' # Use a recent Go version
+
+      - name: Build
+        run: |
+          # Set the GOOS and GOARCH environment variables for the build.
+          # The name of the binary file will be {GOOS}-{GOARCH}.
+          GOOS_VALUE="${{ matrix.goos }}"
+          GOARCH_VALUE="${{ matrix.goarch }}"
+          BUILD_TAGS=""
+
+          # Handle the special case for the amd64-avx architecture.
+          if [ "$GOARCH_VALUE" == "amd64-avx" ]; then
+            GOARCH_VALUE="amd64"
+            BUILD_TAGS="-tags=avx"
+            # Set a more descriptive binary name.
+            BINARY_NAME="godns-${{ matrix.goos }}-${{ matrix.goarch }}"
+          # Handle the special case for the armv5 architecture.
+          elif [ "$GOARCH_VALUE" == "armv5" ]; then
+            GOARCH_VALUE="arm"
+            BUILD_TAGS="-tags=armv5"
+            # Set a more descriptive binary name.
+            BINARY_NAME="godns-${{ matrix.goos }}-${{ matrix.goarch }}"
+          else
+            BINARY_NAME="godns-${{ matrix.goos }}-${{ matrix.goarch }}"
+          fi
+          
+          echo "Building for GOOS=${GOOS_VALUE} GOARCH=${GOARCH_VALUE} with tags ${BUILD_TAGS}"
+          
+          # Use `env` to set the environment variables for this step's run.
+          env GOOS=$GOOS_VALUE GOARCH=$GOARCH_VALUE go build $BUILD_TAGS -o "$BINARY_NAME" ./cmd/main.go
+          
+          # Check if the generated binary exists.
+          if [ ! -f "$BINARY_NAME" ]; then
+            echo "Binary file not found: $BINARY_NAME"
+            exit 1
+          fi
+
+          # Store the name of the binary in a variable that can be used by the next step.
+          echo "BINARY_NAME=$BINARY_NAME" >> $GITHUB_ENV
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # Define the name of the artifact as a combination of OS and architecture.
+          name: godns-binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          # The path to the compiled binary file.
+          path: ${{ env.BINARY_NAME }}
+          if-no-files-found: error
+  
+  # This job depends on the successful completion of the build job.
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    # Only run this job when a new release is created.
+    if: github.event_name == 'release' && github.event.action == 'created'
+    permissions:
+      contents: write # This is required to create and upload to a release.
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # Download all artifacts into a single directory.
+          path: artifacts
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          # This action requires the GITHUB_TOKEN to interact with the API.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # The `files` input specifies which files to upload as release assets.
+          # We use a wildcard to upload all binaries downloaded in the previous step.
+          files: artifacts/*/*
+
