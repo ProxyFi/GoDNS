@@ -35,7 +35,7 @@ type RResp struct {
 // Resolver handles DNS queries to upstream servers.
 type Resolver struct {
 	servers       []string
-	domain_server *suffixTreeNode
+	domain_server *SuffixTreeNode
 	config        *ResolvSettings
 	// dnssecValidator is the DNSSEC validator instance.
 	dnssecValidator *dnssec.DNSSECValidator
@@ -45,7 +45,7 @@ type Resolver struct {
 func NewResolver(c ResolvSettings) *Resolver {
 	r := &Resolver{
 		servers:       []string{},
-		domain_server: newSuffixTreeRoot(),
+		domain_server: NewSuffixTreeRoot(),
 		config:        &c,
 		dnssecValidator: dnssec.NewDNSSECValidator(),
 	}
