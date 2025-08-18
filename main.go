@@ -16,7 +16,7 @@ import (
 // main is the entry point of the GoDNS application.
 // It initializes the logger, starts the DNS server, and
 // handles graceful shutdown via OS signals.
-func main() {
+func Run() {
 
 	// Initialize our custom logger from the `internal/log` package.
 	initLogger()
