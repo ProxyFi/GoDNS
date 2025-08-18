@@ -6,32 +6,18 @@ import (
 	"os"
 
 	"github.com/BurntSushi/toml"
+	"github.com/ProxyFi/GoDNS/internal/log"
 )
 
 // LogLevelMap maps log level strings to their integer constants.
 // The constants are defined below to ensure type safety and clarity.
 var LogLevelMap = map[string]int{
-	"DEBUG":  LevelDebug,
-	"INFO":   LevelInfo,
-	"NOTICE": LevelNotice,
-	"WARN":   LevelWarn,
-	"ERROR":  LevelError,
+	"DEBUG":  log.LevelDebug,
+	"INFO":   log.LevelInfo,
+	"NOTICE": log.LevelNotice,
+	"WARN":   log.LevelWarn,
+	"ERROR":  log.LevelError,
 }
-
-// Log level constants. These use iota to automatically increment values.
-// The `_` is used for a dummy value if needed, although not strictly necessary here.
-const (
-	// LevelDebug represents the debug log level.
-	LevelDebug = iota
-	// LevelInfo represents the info log level.
-	LevelInfo
-	// LevelNotice represents the notice log level.
-	LevelNotice
-	// LevelWarn represents the warn log level.
-	LevelWarn
-	// LevelError represents the error log level.
-	LevelError
-)
 
 // Settings holds all application-wide configuration.
 // It is the root struct for the TOML configuration file.
