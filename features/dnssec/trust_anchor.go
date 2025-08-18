@@ -82,7 +82,7 @@ func (m *TrustAnchorManager) LoadFromFile(path string) error {
 			// If parsing fails, the line is malformed. Log a warning with the
 			// file path, line number, and error, then continue to the next line.
 			// This makes the loader resilient to minor errors in the key file.
-			log.Warnf("Could not parse record in '%s' on line %d: %v", path, lineNumber, err)
+			log.Warn("Could not parse record in '%s' on line %d: %v", path, lineNumber, err)
 			continue
 		}
 
@@ -93,7 +93,7 @@ func (m *TrustAnchorManager) LoadFromFile(path string) error {
 		if !ok {
 			// If the assertion fails, the record is valid DNS data but not a DNSKEY.
 			// This is unexpected for a trust anchor file. Log a warning and skip it.
-			log.Warnf("Skipping non-DNSKEY record of type '%s' in '%s' on line %d", dns.TypeToString[rr.Header().Rrtype], path, lineNumber)
+			log.Warn("Skipping non-DNSKEY record of type '%s' in '%s' on line %d", dns.TypeToString[rr.Header().Rrtype], path, lineNumber)
 			continue
 		}
 
@@ -108,7 +108,7 @@ func (m *TrustAnchorManager) LoadFromFile(path string) error {
 		return fmt.Errorf("error while reading trust anchor file '%s': %w", path, err)
 	}
 
-	log.Infof("Successfully loaded trust anchors from '%s'", path)
+	log.Info("Successfully loaded trust anchors from '%s'", path)
 	// Return nil to indicate that the file was loaded successfully.
 	return nil
 }
