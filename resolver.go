@@ -1,3 +1,5 @@
+// File: resolver.go
+
 package godns
 
 import (
@@ -9,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"sort"
 
 	"github.com/miekg/dns"
 	"github.com/ProxyFi/GoDNS/features/dnssec"
@@ -34,10 +37,17 @@ type RResp struct {
 	rtt        time.Duration
 }
 
+// nameserverState holds a nameserver address and its measured Round-Trip Time (RTT).
+type nameserverState struct {
+	addr string
+	rtt  time.Duration
+}
+
 // Resolver handles DNS queries to upstream servers.
 type Resolver struct {
 	// servers stores a list of default upstream nameservers.
-	servers       []string
+	// This field is used only during initial configuration and is deprecated in favor of rttServers.
+	servers []string
 	// domain_server is a suffix tree used for specific domain rules.
 	domain_server *suffixTreeNode
 	// config holds the resolver's settings.
@@ -47,6 +57,9 @@ type Resolver struct {
 	// udpClient and tcpClient are reused for all DNS lookups to reduce overhead.
 	udpClient *dns.Client
 	tcpClient *dns.Client
+	// rttServers stores a map of nameservers and their measured RTTs for load balancing.
+	rttServers    map[string]*nameserverState
+	serversMutex  sync.RWMutex
 }
 
 // NewResolver creates and initializes a new Resolver instance.
@@ -76,6 +89,8 @@ func NewResolver(c ResolvSettings) (*Resolver, error) {
 			ReadTimeout:  5 * time.Second,
 			WriteTimeout: 5 * time.Second,
 		},
+		rttServers: make(map[string]*nameserverState),
+		serversMutex: sync.RWMutex{},
 	}
 
 	// Load server list from a dedicated file, if configured.
@@ -94,6 +109,26 @@ func NewResolver(c ResolvSettings) (*Resolver, error) {
 
 		for _, server := range clientConfig.Servers {
 			r.servers = append(r.servers, net.JoinHostPort(server, clientConfig.Port))
+		}
+	}
+	
+	// Populate rttServers map from the loaded server list.
+	// This map will be used for latency-based load balancing.
+	if len(r.servers) > 0 {
+		for _, server := range r.servers {
+			r.rttServers[server] = &nameserverState{
+				addr: server, 
+				rtt: time.Duration(c.Timeout) * time.Second,
+			}
+		}
+	} else {
+		// Fallback to hardcoded public DNS servers if none are configured.
+		defaultServers := []string{"8.8.8.8:53", "8.8.4.4:53"}
+		for _, server := range defaultServers {
+			r.rttServers[server] = &nameserverState{
+				addr: server,
+				rtt: time.Duration(c.Timeout) * time.Second,
+			}
 		}
 	}
 
@@ -158,6 +193,12 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (msg *dns.Msg, err error) {
 
 			if lookupErr != nil {
 				log.Warn("%s lookup on %s failed: %s", req.Question[0].String(), nameserver, lookupErr)
+				// Penalize the server by setting its RTT to a high value.
+				r.serversMutex.Lock()
+				if state, ok := r.rttServers[nameserver]; ok {
+					state.rtt = time.Duration(r.config.Timeout) * time.Second
+				}
+				r.serversMutex.Unlock()
 				return
 			}
 			if a != nil && a.Rcode != dns.RcodeServerFailure {
@@ -191,6 +232,17 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (msg *dns.Msg, err error) {
 			}
 			log.Debug("DNSSEC validation successful for %s from %s", req.Question[0].String(), re.nameserver)
 		}
+		
+		// Update the RTT for the successful nameserver based on load balancing setting.
+		if r.config.LoadBalanceEnable {
+			r.serversMutex.Lock()
+			if state, ok := r.rttServers[re.nameserver]; ok {
+				// Use an Exponential Moving Average (EMA) for smoothing.
+				// This gives more weight to recent measurements.
+				state.rtt = time.Duration(float64(state.rtt)*0.9 + float64(re.rtt)*0.1)
+			}
+			r.serversMutex.Unlock()
+		}
 
 		log.Debug("%s resolv on %s rtt: %v", UnFqdn(req.Question[0].Name), re.nameserver, re.rtt)
 		return re.msg, nil
@@ -203,6 +255,7 @@ func (r *Resolver) Lookup(net string, req *dns.Msg) (msg *dns.Msg, err error) {
 
 // Nameservers returns the list of nameservers to use for a given query name.
 // It prioritizes specific rules from the suffix tree over the default list.
+// If load balancing is enabled, it sorts the default servers by RTT.
 func (r *Resolver) Nameservers(qname string) []string {
 	// Split the domain name into parts and ignore the trailing dot.
 	queryKeys := strings.Split(strings.Trim(qname, "."), ".")
@@ -217,12 +270,37 @@ func (r *Resolver) Nameservers(qname string) []string {
 		return ns
 	}
 
-	// If no specific rule is found, use the default server list.
+	// If no specific rule is found and load balancing is enabled, sort by RTT.
+	if r.config.LoadBalanceEnable {
+		r.serversMutex.RLock()
+		defer r.serversMutex.RUnlock()
+		
+		var states []*nameserverState
+		for _, state := range r.rttServers {
+			states = append(states, state)
+		}
+
+		// Sort the nameservers by their measured RTT.
+		sort.Slice(states, func(i, j int) bool {
+			return states[i].rtt < states[j].rtt
+		})
+
+		var sortedServers []string
+		for _, state := range states {
+			sortedServers = append(sortedServers, state.addr)
+		}
+
+		if len(sortedServers) > 0 {
+			return sortedServers
+		}
+	}
+
+	// Fallback to the original, unsorted list if no RTT data or load balancing is disabled.
 	if len(r.servers) > 0 {
 		return r.servers
 	}
 
-	// Fallback to hardcoded public DNS servers if no other servers are configured.
+	// Final fallback to hardcoded public DNS servers if no other servers are configured.
 	return []string{"8.8.8.8:53", "8.8.4.4:53"}
 }
 
