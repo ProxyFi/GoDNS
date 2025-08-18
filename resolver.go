@@ -256,11 +256,3 @@ func addPort(server, port string) string {
 	}
 	return server
 }
-
-// UnFqdn removes the trailing dot from a Fully Qualified Domain Name (FQDN).
-func UnFqdn(s string) string {
-    if dns.IsFqdn(s) {
-        return s[:len(s)-1]
-    }
-    return s
-}
