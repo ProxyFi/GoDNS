@@ -1,3 +1,4 @@
+// File: settings.go
 package godns
 
 import (
@@ -35,6 +36,16 @@ type Settings struct {
 	Hosts        HostsSettings     `toml:"hosts"`
 	// BlocklistSettings added to support blocklist configuration.
 	Blocklist BlocklistSettings `toml:"blocklist"`
+	// DNSSECSettings holds DNSSEC-specific configuration.
+	DNSSEC DNSSECSettings `toml:"dnssec"`
+}
+
+// DNSSECSettings holds configuration for DNSSEC validation.
+type DNSSECSettings struct {
+	Enable           bool `toml:"enable"`
+	TrustAnchorsFile string `toml:"trust-anchors-file"`
+	CacheSize        int    `toml:"cache-size"`
+	CacheTTL         int    `toml:"cache-ttl"`
 }
 
 // ResolvSettings holds resolver-specific configuration.
@@ -56,28 +67,28 @@ type DNSServerSettings struct {
 type RedisSettings struct {
 	Host     string
 	Port     int
-	DB       int
 	Password string
+	DB       int
 }
 
-// MemcacheSettings holds Memcache connection configuration.
+// Addr returns the address string for Redis.
+func (rs RedisSettings) Addr() string {
+	return net.JoinHostPort(rs.Host, strconv.Itoa(rs.Port))
+}
+
+// MemcacheSettings holds memcache connection configuration.
 type MemcacheSettings struct {
 	Servers []string
 }
 
-// Addr returns the Redis server address string.
-func (s RedisSettings) Addr() string {
-	return s.Host + ":" + strconv.Itoa(s.Port)
-}
-
-// LogSettings holds logging configuration.
+// LogSettings holds log configuration.
 type LogSettings struct {
 	Stdout bool
-	File   string
 	Level  string
+	File   string
 }
 
-// LogLevel converts a log level string to its integer constant.
+// LogLevel returns the integer constant for the log level.
 func (ls LogSettings) LogLevel() int {
 	l, ok := LogLevelMap[ls.Level]
 	if !ok {
@@ -105,15 +116,15 @@ type HostsSettings struct {
 
 // BlocklistSettings holds blocklist configuration.
 type BlocklistSettings struct {
-	Enable          bool
-	Backend         string
-	File            string
-	WhitelistFile   string `toml:"whitelist-file"`
-	RefreshInterval int    `toml:"refresh-interval"`
-	RedisEnable     bool   `toml:"redis-enable"`
-	RedisKey        string `toml:"redis-key"`
+	Enable            bool
+	Backend           string
+	File              string
+	WhitelistFile     string `toml:"whitelist-file"`
+	RefreshInterval   int    `toml:"refresh-interval"`
+	RedisEnable       bool   `toml:"redis-enable"`
+	RedisKey          string `toml:"redis-key"`
 	RedisWhitelistKey string `toml:"redis-whitelist-key"`
-	TTL             uint32
+	TTL               uint32
 }
 
 // init loads the configuration from file.
@@ -127,13 +138,7 @@ func init() {
 
 	_, err := toml.DecodeFile(configFile, &settings)
 	if err != nil {
-		fmt.Printf("Get config file error %s\n", err.Error())
-		os.Exit(2)
+		fmt.Fprintf(os.Stderr, "Error in loading configuration: %s\n", err.Error())
+		os.Exit(1)
 	}
-	
-	if verbose {
-		settings.Log.Level = "DEBUG"
-	}
-
-	initLogger()
 }
