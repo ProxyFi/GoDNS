@@ -126,10 +126,20 @@ func (v *DNSSECValidator) validateRRset(rrset []dns.RR) error {
 	// Recursively validate the DNSKEY itself.
 	log.Debug("DNSKEY is not a trust anchor, starting chain validation.")
 	
-	// The recursive part of the validation needs a way to fetch records from the parent zone's
-	// authoritative nameservers. This is the key change from the previous implementation.
-	// We need to find the parent zone's nameservers and query them directly, instead of
-	// using a hardcoded public resolver.
+	return v.validateChain(dnskey)
+}
+
+// validateChain recursively validates the chain of trust for a given DNSKEY.
+// It verifies that the key is backed by a valid DS record in its parent zone,
+// and that the parent's signing key is also valid, continuing up to a trust anchor.
+func (v *DNSSECValidator) validateChain(dnskey *dns.DNSKEY) error {
+	zone := dnskey.Header().Name
+	// The root zone "." has no parent, so its key must be a trust anchor.
+	// This check is also performed in validateRRset, but it's the base case for our recursion.
+	if zone == "." {
+		return fmt.Errorf("reached root, but key with tag %d for '.' is not a configured trust anchor", dnskey.KeyTag())
+	}
+	
 	parentZone := parent(dnskey.Header().Name)
 	if parentZone == "" {
 		// This should only happen for the root zone, which we've already handled.
