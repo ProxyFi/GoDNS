@@ -3,7 +3,7 @@
 package dnssec
 
 import (
-	"bytes" // Added for digest comparison
+	"bytes" // Used for comparing DS record digests.
 	"fmt"
 	"time"
 
@@ -24,8 +24,8 @@ type DNSSECValidator struct {
 
 // NewDNSSECValidator creates a new DNSSECValidator instance.
 // It initializes the trust anchor manager and the DS record cache.
-// A real application should load the trust anchors from a secure,
-// trusted source, typically a file (e.g., `bind.keys`).
+// A production application must load trust anchors from a secure,
+// trusted source, such as the IANA root trust anchor file.
 func NewDNSSECValidator() *DNSSECValidator {
 	v := &DNSSECValidator{
 		trustAnchors: NewTrustAnchorManager(),
@@ -36,7 +36,8 @@ func NewDNSSECValidator() *DNSSECValidator {
 }
 
 // AddTrustAnchor adds a trust anchor to the validator's trust store.
-// A trust anchor is a DNSKEY that is trusted without any further validation.
+// A trust anchor is a DNSKEY that is trusted without any further validation,
+// typically the root zone's Key Signing Key (KSK).
 func (v *DNSSECValidator) AddTrustAnchor(keyTag uint16, dnskey *dns.DNSKEY) {
 	v.trustAnchors.Add(dnskey)
 }
@@ -66,6 +67,9 @@ func (v *DNSSECValidator) Validate(msg *dns.Msg) error {
 
 	// Group records by their owner name and type covered.
 	signedRRsets := groupSignedRRsets(msg)
+	if len(signedRRsets) == 0 {
+		return fmt.Errorf("no signed RRsets found in the message to validate")
+	}
 
 	// Iterate through all found signed RRsets and validate each one.
 	// A single DNS response can contain multiple signed RRsets.
@@ -76,12 +80,7 @@ func (v *DNSSECValidator) Validate(msg *dns.Msg) error {
 		}
 	}
 
-	// This is a simplified check. A full-fledged validator would need to handle
-	// messages with only DS and DNSKEY records (e.g., in the Authority section)
-	// and trigger the recursive validation from there. For this implementation,
-	// we assume the initial validation point is an RRset in the Answer section.
 	log.Info("All signed RRsets validated successfully.")
-
 	return nil
 }
 
@@ -102,8 +101,12 @@ func (v *DNSSECValidator) validateRRset(rrset []dns.RR) error {
 	if rrsig.Expiration < uint32(time.Now().Unix()) {
 		return ErrSignatureExpired
 	}
+	// Check if the signature is valid yet.
+	if rrsig.Inception > uint32(time.Now().Unix()) {
+		return ErrSignatureNotYetValid
+	}
 
-	// Check if the DNSKEY exists in the message.
+	// Find the DNSKEY that was used to sign this RRset.
 	dnskey := findDNSKEYForRRSIG(rrset, rrsig)
 	if dnskey == nil {
 		return ErrDNSKEYNotFound
@@ -126,44 +129,118 @@ func (v *DNSSECValidator) validateRRset(rrset []dns.RR) error {
 }
 
 // validateChain recursively validates the chain of trust for a given DNSKEY.
-// It simulates fetching the parent zone's DS record and verifying it against the DNSKEY.
+// It verifies that the key is backed by a valid DS record in its parent zone,
+// and that the parent's signing key is also valid, continuing up to a trust anchor.
 func (v *DNSSECValidator) validateChain(dnskey *dns.DNSKEY) error {
-	// Simulate fetching the parent zone's DS record.
-	// In a real resolver, this would involve a recursive lookup.
-	parentDS, err := v.fetchDS(dnskey.Header().Name)
+	resolver := "8.8.8.8:53" // Use a public resolver for external queries.
+	client := new(dns.Client)
+	zone := dnskey.Header().Name
+
+	// The root zone "." has no parent, so its key must be a trust anchor.
+	// This check is also performed in validateRRset, but it's the base case for our recursion.
+	if zone == "." {
+		return fmt.Errorf("reached root, but key with tag %d for '.' is not a configured trust anchor", dnskey.KeyTag())
+	}
+
+	// --- Step 1: Fetch the DS RRset and its RRSIG for the current zone ---
+	// This query goes to the parent zone's nameservers (via the resolver).
+	dsQueryMsg := new(dns.Msg)
+	dsQueryMsg.SetQuestion(dns.Fqdn(zone), dns.TypeDS)
+	dsQueryMsg.SetEdns0(4096, true) // Enable DNSSEC
+
+	dsResponseMsg, _, err := client.Exchange(dsQueryMsg, resolver)
 	if err != nil {
-		return fmt.Errorf("failed to fetch DS record for parent zone: %w", err)
+		return fmt.Errorf("query for DS RRset of %s failed: %w", zone, err)
+	}
+	if dsResponseMsg.Rcode != dns.RcodeSuccess {
+		return fmt.Errorf("query for DS RRset of %s returned code %s", zone, dns.RcodeToString[dsResponseMsg.Rcode])
 	}
 
-	// Validate the DNSKEY against the fetched DS record.
-	// This is done by generating a DS record from the DNSKEY and comparing digests.
-	generatedDS := dnskey.ToDS(dns.SHA256)
-	if !bytes.Equal([]byte(parentDS.Digest), []byte(generatedDS.Digest)) {
-		return ErrDSKeyMismatch
+	// Extract the DS RRset and its RRSIG from the response.
+	var dsRRset []dns.RR
+	var dsRrsig *dns.RRSIG
+	// DS records for a zone are found in the authority section of a response for that zone,
+	// or in the answer section of a direct query for the DS record.
+	for _, rr := range append(dsResponseMsg.Answer, dsResponseMsg.Ns...) {
+		if rr.Header().Name == zone && rr.Header().Rrtype == dns.TypeDS {
+			dsRRset = append(dsRRset, rr)
+		}
+		if rrsig, ok := rr.(*dns.RRSIG); ok && rrsig.TypeCovered == dns.TypeDS && rrsig.Header().Name == zone {
+			dsRrsig = rrsig
+		}
 	}
 
-	// The DS record is signed, so we need to recursively validate its
-	// signing key, which is located in the grand-parent zone.
-	parentZone := parent(dnskey.Header().Name)
-	grandParentMsg := &dns.Msg{}
-	grandParentMsg.SetQuestion(parentZone, dns.TypeDS)
-	// Here, we would perform a recursive DNS query to get the parent's DS record.
-	// For this example, we assume we get the required DNSKEY and RRSIG in the response.
-	// Let's assume we get a message containing the parent's DNSKEY and RRSIG.
-	// This part is a placeholder for a real lookup.
-	//
-	// In a real implementation:
-	// c := new(dns.Client)
-	// resp, _, err := c.Exchange(grandParentMsg, "resolver-address")
-	//
-	// For this example, we return a success for the recursive call.
-	log.Debug("Successfully validated DNSKEY against DS record. Chain is complete.")
+	if len(dsRRset) == 0 {
+		return fmt.Errorf("no DS records found for zone %s, cannot validate chain", zone)
+	}
+	if dsRrsig == nil {
+		return fmt.Errorf("no RRSIG found for DS records of zone %s, cannot validate chain", zone)
+	}
 
-	return nil
+	// --- Step 2: Verify that a DS record in the set matches our dnskey ---
+	var dsMatchFound bool
+	for _, rr := range dsRRset {
+		ds := rr.(*dns.DS)
+		// Generate a DS record from our key using the same digest type as the fetched DS record.
+		generatedDS := dnskey.ToDS(ds.DigestType)
+		if generatedDS != nil && ds.KeyTag == generatedDS.KeyTag && bytes.Equal([]byte(ds.Digest), []byte(generatedDS.Digest)) {
+			dsMatchFound = true
+			break
+		}
+	}
+	if !dsMatchFound {
+		return fmt.Errorf("%w: DNSKEY for %s (tag %d) does not match any DS records in parent zone", ErrDSKeyMismatch, zone, dnskey.KeyTag())
+	}
+	log.Debug("DNSKEY for ", zone, " matches its DS record in the parent zone.")
+
+	// --- Step 3: Fetch the parent zone's DNSKEYs to verify the DS RRSIG ---
+	parentZone := dsRrsig.SignerName
+	keyQueryMsg := new(dns.Msg)
+	keyQueryMsg.SetQuestion(dns.Fqdn(parentZone), dns.TypeDNSKEY)
+	keyQueryMsg.SetEdns0(4096, true)
+
+	keyResponseMsg, _, err := client.Exchange(keyQueryMsg, resolver)
+	if err != nil {
+		return fmt.Errorf("query for DNSKEYs of parent zone %s failed: %w", parentZone, err)
+	}
+	if keyResponseMsg.Rcode != dns.RcodeSuccess {
+		return fmt.Errorf("query for DNSKEYs of %s returned code %s", parentZone, dns.RcodeToString[keyResponseMsg.Rcode])
+	}
+
+	// Find the specific parent DNSKEY that signed the DS record set.
+	var parentSigningKey *dns.DNSKEY
+	for _, rr := range append(keyResponseMsg.Answer, keyResponseMsg.Ns...) {
+		if key, ok := rr.(*dns.DNSKEY); ok {
+			// The key must match the signer name and key tag from the RRSIG.
+			if key.Header().Name == parentZone && key.KeyTag() == dsRrsig.KeyTag {
+				parentSigningKey = key
+				break
+			}
+		}
+	}
+	if parentSigningKey == nil {
+		return fmt.Errorf("could not find parent DNSKEY (tag %d) for zone %s to verify DS record", dsRrsig.KeyTag, parentZone)
+	}
+
+	// --- Step 4: Verify the signature on the DS RRset ---
+	if err := dsRrsig.Verify(parentSigningKey, dsRRset); err != nil {
+		return fmt.Errorf("verification of RRSIG for DS record of %s failed: %w", zone, err)
+	}
+	log.Debug("Successfully verified signature on DS record for ", zone)
+
+	// --- Step 5: Recursively validate the parent's signing key ---
+	// Check if the parent key is a trust anchor, which is the end of the chain.
+	if _, isTrustAnchor := v.trustAnchors.Get(parentSigningKey.KeyTag()); isTrustAnchor {
+		log.Info("Successfully validated chain of trust to a trust anchor for zone ", parentZone)
+		return nil
+	}
+
+	log.Debug("Parent key for ", parentZone, " is not a trust anchor. Continuing validation up the chain.")
+	return v.validateChain(parentSigningKey)
 }
 
-// fetchDS simulates fetching a DS record for a given zone.
-// In a real application, this would query the parent zone's nameserver for the DS record.
+// fetchDS fetches a DS record for a given zone from a public resolver.
+// This function performs a live DNS query to retrieve the delegation signer record.
 func (v *DNSSECValidator) fetchDS(zone string) (*dns.DS, error) {
 	// Look up in cache first.
 	if ds, ok := v.dsCache.GetDS(zone); ok {
@@ -171,50 +248,74 @@ func (v *DNSSECValidator) fetchDS(zone string) (*dns.DS, error) {
 		return ds.delegation, nil
 	}
 
-	// Simulate a DS record lookup.
-	// In reality, this would be a DNS query.
-	// We'll create a dummy DS record for this example.
-	dnskey := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET},
-		Flags:     257, // Corrected to use literal value to avoid build error
-		Protocol:  3,
-		Algorithm: dns.ECDSAP256SHA256,
-		PublicKey: "AwEAAcyKqA==",
-	}
-	ds, err := CreateDSFromDNSKEY(dnskey)
+	// Use a public resolver for this implementation. A full recursive resolver
+	// would find and query the parent's authoritative nameservers directly.
+	resolver := "8.8.8.8:53"
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(zone), dns.TypeDS)
+	m.SetEdns0(4096, true) // Request DNSSEC records
+
+	c := new(dns.Client)
+	in, _, err := c.Exchange(m, resolver)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create dummy DS record: %w", err)
+		return nil, fmt.Errorf("DS query for %s failed: %w", zone, err)
 	}
 
-	// Cache the simulated record.
-	v.dsCache.SetDS(zone, &dsData{
-		keyTag:      ds.KeyTag,
-		algorithm:   ds.Algorithm,
-		digestType:  ds.DigestType,
-		digest:      []byte(ds.Digest), // Corrected type conversion
-		delegation:  ds,
-		chain:       []*dns.DS{}, // A real implementation would build this chain
-	})
+	if in.Rcode != dns.RcodeSuccess {
+		return nil, fmt.Errorf("DS query for %s returned rcode %s", zone, dns.RcodeToString[in.Rcode])
+	}
 
-	log.Debug("Simulated fetch of DS record for zone: ", zone)
-	return ds, nil
+	// Find the first DS record in the answer or authority section.
+	// Note that a zone can have multiple DS records; the full validation logic
+	// in validateChain handles the entire RRset. This function is a helper
+	// for simpler checks or initial fetching.
+	for _, rr := range append(in.Answer, in.Ns...) {
+		if ds, ok := rr.(*dns.DS); ok {
+			// Cache the found record.
+			v.dsCache.SetDS(zone, &dsData{
+				keyTag:     ds.KeyTag,
+				algorithm:  ds.Algorithm,
+				digestType: ds.DigestType,
+				digest:     []byte(ds.Digest),
+				delegation: ds,
+				chain:      []*dns.DS{},
+			})
+			log.Debug("Fetched DS record for zone: ", zone)
+			return ds, nil
+		}
+	}
+
+	return nil, fmt.Errorf("no DS record found for zone %s", zone)
 }
 
 // CheckDNSSECValidity checks if the DNSSEC records in the response are valid.
 // This is a simple, non-chain-of-trust check, verifying only that RRSIGs
-// are present and have not expired.
+// are present and have not expired and are not premature.
 func CheckDNSSECValidity(msg *dns.Msg) bool {
-	// A basic check to see if RRSIGs are present and not expired.
-	for _, rr := range msg.Answer {
+	hasValidRRSIG := false
+	now := uint32(time.Now().Unix())
+
+	// A basic check to see if RRSIGs are present and within their validity period.
+	for _, rr := range append(msg.Answer, msg.Ns...) {
 		if sig, ok := rr.(*dns.RRSIG); ok {
 			// Check if the signature has expired.
-			if uint32(time.Now().Unix()) > sig.Expiration {
+			if now > sig.Expiration {
 				log.Warn("Found an expired RRSIG for: ", sig.Header().Name)
 				return false
 			}
+			// Check if the signature is valid yet.
+			if now < sig.Inception {
+				log.Warn("Found a not-yet-valid RRSIG for: ", sig.Header().Name)
+				return false
+			}
+			hasValidRRSIG = true
 		}
 	}
-	log.Info("All RRSIG records in message are valid and not expired.")
+
+	if hasValidRRSIG {
+		log.Info("All RRSIG records in message are within their validity period.")
+	} else {
+		log.Info("No RRSIG records found in message to check for validity.")
+	}
 	return true
 }
-
