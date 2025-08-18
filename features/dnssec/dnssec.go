@@ -331,55 +331,6 @@ func (v *DNSSECValidator) fetchDNSKEYsFromParent(parentZone string) (*dns.Msg, e
 	return nil, fmt.Errorf("failed to fetch DNSKEYs for %s from any parent nameserver", parentZone)
 }
 
-// fetchDS fetches a DS record for a given zone from a public resolver.
-// This function performs a live DNS query to retrieve the delegation signer record.
-func (v *DNSSECValidator) fetchDS(zone string) (*dns.DS, error) {
-	// Look up in cache first.
-	if ds, ok := v.dsCache.GetDS(zone); ok {
-		log.Debug("DS record found in cache for zone: ", zone)
-		return ds.delegation, nil
-	}
-
-	// Use a public resolver for this implementation. A full recursive resolver
-	// would find and query the parent's authoritative nameservers directly.
-	resolver := "8.8.8.8:53"
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(zone), dns.TypeDS)
-	m.SetEdns0(4096, true) // Request DNSSEC records
-
-	c := new(dns.Client)
-	in, _, err := c.Exchange(m, resolver)
-	if err != nil {
-		return nil, fmt.Errorf("DS query for %s failed: %w", zone, err)
-	}
-
-	if in.Rcode != dns.RcodeSuccess {
-		return nil, fmt.Errorf("DS query for %s returned rcode %s", zone, dns.RcodeToString[in.Rcode])
-	}
-
-	// Find the first DS record in the answer or authority section.
-	// Note that a zone can have multiple DS records; the full validation logic
-	// in validateChain handles the entire RRset. This function is a helper
-	// for simpler checks or initial fetching.
-	for _, rr := range append(in.Answer, in.Ns...) {
-		if ds, ok := rr.(*dns.DS); ok {
-			// Cache the found record.
-			v.dsCache.SetDS(zone, &dsData{
-				keyTag:     ds.KeyTag,
-				algorithm:  ds.Algorithm,
-				digestType: ds.DigestType,
-				digest:     []byte(ds.Digest),
-				delegation: ds,
-				chain:      []*dns.DS{},
-			})
-			log.Debug("Fetched DS record for zone: ", zone)
-			return ds, nil
-		}
-	}
-
-	return nil, fmt.Errorf("no DS record found for zone %s", zone)
-}
-
 // CheckDNSSECValidity checks if the DNSSEC records in the response are valid.
 // This is a simple, non-chain-of-trust check, verifying only that RRSIGs
 // are present and have not expired and are not premature.
