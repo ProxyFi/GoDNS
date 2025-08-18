@@ -43,6 +43,7 @@ type ResolvSettings struct {
 	ResolvFile     string `toml:"resolv-file"`
 	DNSSECEnable   bool   `toml:"dnssec-enable"`
 	TrustAnchorFile string `toml:"trust-anchor-file"`
+	EnableLatencyBasedLoadBalancing bool `toml:"enable-latency-based-load-balancing"`
 }
 
 // DNSServerSettings holds DNS server-specific configuration.
